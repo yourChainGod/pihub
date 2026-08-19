@@ -48,7 +48,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          readonly version="$(node -p 'require("./server/package.json").version')"
+          version="$(node -p 'require("./server/package.json").version')"
+          readonly version
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
           echo "server=${version}" >> "${GITHUB_OUTPUT}"
 
@@ -164,7 +165,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          readonly version="$(node -p 'require("./server/package.json").version')"
+          version="$(node -p 'require("./server/package.json").version')"
+          readonly version
           [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
           echo "server=${version}" >> "${GITHUB_OUTPUT}"
 

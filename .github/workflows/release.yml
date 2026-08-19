@@ -989,8 +989,10 @@ jobs:
           readonly expected_list="${RUNNER_TEMP}/expected-assets.txt"
           readonly current_list="${RUNNER_TEMP}/current-assets.txt"
           readonly missing_list="${RUNNER_TEMP}/missing-assets.txt"
-          readonly existing_directory="$(mktemp -d)"
-          readonly verify_directory="$(mktemp -d)"
+          existing_directory="$(mktemp -d)"
+          readonly existing_directory
+          verify_directory="$(mktemp -d)"
+          readonly verify_directory
 
           assert_remote_source() {
             local remote_ref remote_object remote_type remote_tag comparison peel_depth
@@ -1037,7 +1039,8 @@ jobs:
           assert_remote_source
           releases_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
           matching_releases="$(jq -c --arg tag "${tag}" '[.[][] | select(.tag_name == $tag)]' <<<"${releases_json}")"
-          readonly release_count="$(jq -r 'length' <<<"${matching_releases}")"
+          release_count="$(jq -r 'length' <<<"${matching_releases}")"
+          readonly release_count
           if [[ "${release_count}" == "1" ]]; then
             release_json="$(jq -c '.[0]' <<<"${matching_releases}")"
             jq -e \
@@ -1045,7 +1048,8 @@ jobs:
               --arg commit "${commit}" \
               '.tag_name == $tag and .target_commitish == $commit and .draft == true and .prerelease == false' \
               <<<"${release_json}" >/dev/null
-            readonly release_id="$(jq -er '.id' <<<"${release_json}")"
+            release_id="$(jq -er '.id' <<<"${release_json}")"
+            readonly release_id
             assets_json="$(list_assets "${release_id}")"
             jq -e 'group_by(.name) | all(length == 1)' <<<"${assets_json}" >/dev/null
             jq -r '.[].name' <<<"${assets_json}" | LC_ALL=C sort > "${current_list}"
@@ -1073,7 +1077,8 @@ jobs:
               -f body='Signed PiHub Desktop and standalone Server artifacts. Keep this release as a draft until native install, update, rollback, and privacy verification pass.' \
               -F draft=true \
               -F prerelease=false)"
-            readonly release_id="$(jq -er '.id' <<<"${release_json}")"
+            release_id="$(jq -er '.id' <<<"${release_json}")"
+            readonly release_id
             : > "${current_list}"
           else
             echo "Multiple releases use the requested tag; refusing publication" >&2
