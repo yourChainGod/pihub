@@ -1,0 +1,359 @@
+export type DeviceSource = "tailscale" | "manual";
+
+export interface Device {
+  id: string;
+  name: string;
+  host: string;
+  url: string;
+  source: DeviceSource;
+  favorite: boolean;
+  accent: string;
+  os?: string;
+}
+
+export interface DeviceStatus {
+  state: "online" | "auth" | "offline" | "checking";
+  latencyMs?: number;
+  version?: string;
+  error?: string;
+}
+
+export interface DeviceCredentialStatus {
+  paired: boolean;
+  deviceId?: string;
+}
+
+export interface TailnetPeer {
+  id: string;
+  name: string;
+  host: string;
+  dnsName?: string;
+  ip: string;
+  os?: string;
+  online: boolean;
+  isSelf: boolean;
+  piWeb: boolean;
+  requiresAuth: boolean;
+  url: string;
+  latencyMs?: number;
+  version?: string;
+  setup?: RemoteSetupStatus;
+}
+
+export interface TailnetScan {
+  available: boolean;
+  tailnet?: string;
+  peers: TailnetPeer[];
+  message?: string;
+}
+
+export interface RemoteSession {
+  id: string;
+  cwd: string;
+  name?: string;
+  created: string;
+  modified: string;
+  messageCount: number;
+  firstMessage: string;
+  projectRoot?: string;
+  projectKey?: string;
+  worktreeBranch?: string;
+  transient?: boolean;
+}
+
+export interface SessionMessage {
+  role: "user" | "assistant" | "toolResult" | string;
+  content: unknown;
+  timestamp?: number;
+  [key: string]: unknown;
+}
+
+export interface RemoteDirectoryEntry { name: string; path: string; }
+export interface RemoteDirectoryBrowse {
+  path: string;
+  parentPath: string | null;
+  directories: RemoteDirectoryEntry[];
+  drives?: RemoteDirectoryEntry[];
+}
+
+export interface SessionTreeNode {
+  entry: { id: string; type: string; [key: string]: unknown };
+  children: SessionTreeNode[];
+  label?: string;
+  compressedEntryIds?: string[];
+  branchPreview?: { role?: "user" | "assistant"; text: string };
+}
+
+export interface SessionDetail {
+  sessionId: string;
+  filePath?: string;
+  leafId?: string | null;
+  tree?: SessionTreeNode[];
+  info: RemoteSession | null;
+  context: {
+    messages: SessionMessage[];
+    entryIds: string[];
+    thinkingLevel: string;
+    model: { provider: string; modelId: string } | null;
+    truncated?: boolean;
+    totalMessages?: number;
+  };
+  totalActiveMs: number;
+}
+
+export interface RemoteUiRequest {
+  id: string;
+  method: "select" | "confirm" | "input" | "editor" | "notify" | string;
+  title?: string;
+  message?: string;
+  options?: string[];
+  placeholder?: string;
+  prefill?: string;
+  notifyType?: "info" | "warning" | "error";
+}
+
+export interface RemoteContextUsage {
+  percent: number | null;
+  contextWindow: number;
+  tokens: number | null;
+}
+
+export interface RemoteAgentState {
+  running: boolean;
+  state?: {
+    isStreaming?: boolean;
+    isCompacting?: boolean;
+    thinkingLevel?: string;
+    model?: { id: string; provider: string };
+    contextUsage?: RemoteContextUsage | null;
+    systemPrompt?: string;
+  };
+}
+
+export interface RemoteAgentEventPayload {
+  deviceId: string;
+  deviceOrigin: string;
+  sessionId: string;
+  generation: number;
+  event: Record<string, unknown>;
+}
+
+export interface AttachedImage {
+  data: string;
+  mimeType: string;
+  name: string;
+}
+
+export interface SessionTokenStats {
+  userMessages: number;
+  assistantMessages: number;
+  toolCalls: number;
+  toolResults: number;
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+  cost: number;
+}
+
+export interface RemoteModelEntry { id: string; name: string; provider: string }
+export interface RemoteModelsResponse {
+  models: Record<string, string>;
+  modelList: RemoteModelEntry[];
+  defaultModel: { provider: string; modelId: string } | null;
+  thinkingLevels: Record<string, string[]>;
+  thinkingLevelMaps?: Record<string, Record<string, string | null>>;
+  thinkingLevelPins?: Record<string, string>;
+  modelError?: string;
+  modelScopeWarnings?: string[];
+}
+
+export interface RemoteNewApiProvider {
+  name: string;
+  baseUrl: string;
+  authenticated: boolean;
+  overrideCount: number;
+}
+
+export interface RemoteNewApiConfig {
+  providers: RemoteNewApiProvider[];
+  settings: { sendSessionAffinityHeaders: boolean };
+  modelCount?: number;
+}
+
+export interface RemoteGitStatus {
+  isGitRepository: boolean;
+  isBareRepository?: boolean;
+  repositoryRoot: string | null;
+  files: Array<{
+    filePath: string;
+    status: string;
+    code?: string;
+    indexStatus?: string;
+    worktreeStatus?: string;
+  }>;
+  additions: number;
+  deletions: number;
+}
+
+export interface RemoteGitDiff {
+  supported: boolean;
+  status?: string;
+  patch?: string;
+}
+
+export interface RemoteWorktree {
+  path: string;
+  branch: string | null;
+  isMain: boolean;
+}
+
+export interface RemoteWorktrees {
+  projectRoot: string;
+  projectKey: string;
+  isGit: boolean;
+  isTopLevel: boolean;
+  currentWorktreePath: string | null;
+  worktrees: RemoteWorktree[];
+}
+
+export interface RemoteProjectTrustStatus {
+  requiresTrust: boolean;
+  trusted: boolean;
+}
+
+export type RemoteResourceScope = "global" | "project";
+
+export interface RemoteResourceDiagnostic {
+  type: "warning" | "error";
+  code?: string;
+  message: string;
+  source?: string;
+  path?: string;
+}
+
+export interface RemoteSkillInstallInfo {
+  package: string;
+  scope: RemoteResourceScope;
+  source: string;
+  sourceType?: string;
+  skillsShUrl?: string;
+  skillPath?: string;
+  ref?: string;
+  versionHash?: string;
+  canCheckForUpdates: boolean;
+}
+
+export interface RemoteSkillInfo {
+  name: string;
+  description: string;
+  filePath: string;
+  baseDir: string;
+  disableModelInvocation: boolean;
+  sourceInfo: {
+    source?: string;
+    scope?: string;
+  };
+  install?: RemoteSkillInstallInfo;
+}
+
+export interface RemoteSkillsResponse {
+  skills: RemoteSkillInfo[];
+  diagnostics: RemoteResourceDiagnostic[];
+  projectResourcesLoaded: boolean;
+}
+
+export interface RemotePluginResourceCounts {
+  extensions: number;
+  skills: number;
+  prompts: number;
+  themes: number;
+}
+
+export interface RemotePluginPackageInfo {
+  id: string;
+  label: string;
+  scope: RemoteResourceScope;
+  disabled: boolean;
+  version?: string;
+  counts: RemotePluginResourceCounts;
+  status: "loaded" | "installed" | "missing" | "disabled";
+}
+
+export interface RemotePluginsResponse {
+  packages: RemotePluginPackageInfo[];
+  totals: RemotePluginResourceCounts;
+  diagnostics: RemoteResourceDiagnostic[];
+  projectResourcesLoaded: boolean;
+}
+
+export interface RemoteFilePreview {
+  content: string;
+  language: string;
+  size: number;
+}
+
+export interface RemoteDirectoryListing {
+  path: string;
+  entries: Array<{ name: string; isDir: boolean; size: number; modified: string }>;
+}
+
+export interface NewRemoteSession {
+  success: boolean;
+  sessionId: string;
+  model: { provider: string; modelId: string } | null;
+  thinkingLevel?: string;
+}
+
+export interface RemoteSetupStatus {
+  platform?: { os: string; remoteAccess: "tailscale-ssh" | "openssh"; openSshRunning: boolean; terminalBackend: string; preferredShell: string };
+  tailscale: { installed: boolean; connected: boolean; dnsName: string; sshEnabled: boolean; sshSupported?: boolean; serveEnabled: boolean; serveUrl: string };
+  pi: { installed: boolean };
+  provider?: { installed: boolean; source: string };
+  defaultExtensions: {
+    installed: boolean;
+    installedCount: number;
+    total: number;
+    source: "signed-release";
+    packages: Array<{ name: string; version: string; installed: boolean }>;
+  };
+  server?: { installed: boolean; packageName: string; version: string | null; running: boolean };
+  installPlan?: string[];
+  security: { binding: string; tailnetOnly: boolean; funnelSupported: boolean };
+}
+
+export type RemoteServerUpdatePhase =
+  | "idle"
+  | "recovering"
+  | "queued"
+  | "applying"
+  | "restarting"
+  | "succeeded"
+  | "failed";
+
+export interface RemoteServerUpdateState {
+  phase: RemoteServerUpdatePhase;
+  operationId?: string;
+  targetVersion?: string;
+  resultVersion?: string;
+  errorCode?: string;
+  updatedAt: string;
+}
+
+export interface RemoteUpdates {
+  server: {
+    current: string | null;
+    latest: string;
+    updateAvailable: boolean;
+    platform: "darwin" | "linux" | "win32";
+    arch: "arm64" | "x64";
+    channel: "stable";
+  };
+  installSupported: boolean;
+  update: RemoteServerUpdateState | null;
+  running: string[];
+  checkedAt: string;
+}
+
+export interface RemoteServerUpdateAccepted {
+  accepted: true;
+  operationId: string;
+  update: RemoteServerUpdateState & { phase: "queued"; operationId: string };
+}

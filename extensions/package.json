@@ -1,0 +1,15 @@
+{
+  "name": "@pihub/default-extensions",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {
+    "node": ">=22.19.0 <23"
+  },
+  "dependencies": {
+    "@ff-labs/pi-fff": "0.10.5",
+    "pi-simplify": "0.2.3",
+    "@gotgenes/pi-permission-system": "26.3.0",
+    "@eko24ive/pi-ask": "1.2.0",
+    "@gotgenes/pi-subagents": "19.3.2"
+  }
+}

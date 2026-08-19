@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build and test output
+dist/
+build/
+out/
+coverage/
+test-results/
+playwright-report/
+blob-report/
+**/test-results/
+**/playwright-report/
+**/blob-report/
+**/trace.zip
+**/videos/
+server/.next/
+src-tauri/target/
+src-tauri/gen/
+*.tsbuildinfo
+next-env.d.ts
+
+# Generated release artifacts
+src-tauri/resources/*.tgz
+src-tauri/tauri.release.generated.conf.json
+release-artifacts/
+*.dmg
+*.msi
+*.AppImage
+*.deb
+*.rpm
+*.sig
+
+# Secrets and machine-local configuration
+.env*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.mobileprovision
+*.provisionprofile
+
+# Logs and local tool state
+*.log
+.factory
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Private development records
+HANDOFF.md
+instruction.dev.md
+autoresearch-*
+research-results.tsv

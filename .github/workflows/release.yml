@@ -1,0 +1,1120 @@
+name: Release PiHub
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Existing immutable refs/tags/vMAJOR.MINOR.PATCH ref to release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CI: true
+  FORCE_COLOR: "0"
+  npm_config_ignore_scripts: "true"
+  npm_config_registry: https://registry.npmjs.org
+
+concurrency:
+  group: pihub-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate immutable release source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: write
+    env:
+      CI: true
+      PIHUB_RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
+      GITHUB_REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+    outputs:
+      ref: ${{ steps.source.outputs.ref }}
+      tag: ${{ steps.source.outputs.tag }}
+      tag_object: ${{ steps.source.outputs.tag_object }}
+      commit: ${{ steps.source.outputs.commit }}
+      version: ${{ steps.source.outputs.version }}
+      pub_date: ${{ steps.source.outputs.pub_date }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ env.PIHUB_RELEASE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag, repository, and main ancestry
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly release_ref="${PIHUB_RELEASE_REF}"
+          if [[ "${GITHUB_REPOSITORY}" != "yourChainGod/pihub" ]]; then
+            echo "Release repository must be exactly yourChainGod/pihub" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REPOSITORY_VISIBILITY}" != "public" ]]; then
+            echo "Anonymous update assets require the release repository to be public" >&2
+            exit 1
+          fi
+          if [[ ! "${release_ref}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release ref must be exactly refs/tags/vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "${release_ref}" ]]; then
+            echo "The workflow definition and release source must come from the same tag ref" >&2
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "${release_ref}"; then
+            echo "The requested ref is not an exact local tag ref" >&2
+            exit 1
+          fi
+          readonly tag="${release_ref#refs/tags/}"
+          readonly tag_object="$(git rev-parse --verify "${release_ref}")"
+          readonly commit="$(git rev-parse --verify "${release_ref}^{commit}")"
+          if [[ ! "${tag_object}" =~ ^[0-9a-f]{40}$ || ! "${commit}" =~ ^[0-9a-f]{40}$ || "$(git rev-parse HEAD)" != "${commit}" ]]; then
+            echo "Checked out source does not resolve to the requested tag commit" >&2
+            exit 1
+          fi
+
+          remote_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          remote_object="$(jq -er '.object.sha' <<<"${remote_ref}")"
+          remote_type="$(jq -er '.object.type' <<<"${remote_ref}")"
+          if [[ "${remote_object}" != "${tag_object}" ]]; then
+            echo "The remote tag object differs from the checked out tag" >&2
+            exit 1
+          fi
+          peel_depth=0
+          while [[ "${remote_type}" == "tag" ]]; do
+            ((peel_depth += 1))
+            if ((peel_depth > 4)); then
+              echo "The release tag contains too many nested tag objects" >&2
+              exit 1
+            fi
+            remote_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
+            remote_object="$(jq -er '.object.sha' <<<"${remote_tag}")"
+            remote_type="$(jq -er '.object.type' <<<"${remote_tag}")"
+          done
+          if [[ "${remote_type}" != "commit" || "${remote_object}" != "${commit}" ]]; then
+            echo "The remote tag does not peel to the validated commit" >&2
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet refs/remotes/origin/main; then
+            echo "Complete checkout is missing refs/remotes/origin/main" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${commit}" refs/remotes/origin/main; then
+            echo "Release tag ${tag} is not reachable from origin/main" >&2
+            exit 1
+          fi
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${commit}...main" --jq '.status')"
+          if [[ "${comparison}" != "ahead" && "${comparison}" != "identical" ]]; then
+            echo "Release tag ${tag} is not reachable from the current remote main" >&2
+            exit 1
+          fi
+          readonly version="${tag#v}"
+          readonly pub_date="$(git show -s --format=%cI "${commit}")"
+          {
+            echo "ref=${release_ref}"
+            echo "tag=${tag}"
+            echo "tag_object=${tag_object}"
+            echo "commit=${commit}"
+            echo "version=${version}"
+            echo "pub_date=${pub_date}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            extensions/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.89.0
+          components: clippy,rustfmt
+
+      - name: Install Linux desktop dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Verify the locked Server and extension supply chains
+        run: |
+          node scripts/verify-server-lock.mjs
+          node scripts/default-extension-bundle.mjs
+
+      - name: Install locked dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --prefix server --ignore-scripts --no-audit --no-fund
+
+      - name: Install locked Playwright browsers
+        run: npx --no-install playwright install --with-deps chromium firefox webkit
+
+      - name: Lint desktop application
+        run: npm run lint
+
+      - name: Audit JavaScript lock files
+        env:
+          npm_config_ignore_scripts: "true"
+          npm_config_registry: https://registry.npmjs.org
+        run: |
+          npm audit --package-lock-only --omit=peer --audit-level=high
+          npm --prefix server audit --package-lock-only --omit=peer --audit-level=high
+          npm --prefix extensions audit --package-lock-only --omit=peer --audit-level=high
+
+      - name: Audit Rust lock file
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ github.token }}
+          working-directory: src-tauri
+
+      - name: Run privacy and script tests
+        run: |
+          node scripts/privacy-scan.mjs --fail-on-warnings
+          node scripts/verify-icon-assets.mjs
+          node --test scripts/*.test.mjs
+          npm run test:unit
+          find scripts -maxdepth 1 -type f -name '*.mjs' -print0 | LC_ALL=C sort -z | xargs -0 -n 1 node --check
+
+      - name: Validate desktop application
+        run: |
+          npm run build
+          npm run test:e2e
+
+      - name: Validate Server
+        run: |
+          npm --prefix server test
+          npm --prefix server run lint
+          npm --prefix server exec -- tsc --noEmit --pretty false
+          npm run server:build
+
+      - name: Validate Rust desktop shell
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --all-features
+
+      - name: Validate release configuration
+        env:
+          PIHUB_RELEASE_TAG: ${{ steps.source.outputs.tag }}
+        run: node scripts/check-release-config.mjs --tag "${PIHUB_RELEASE_TAG}"
+
+  build-server-release:
+    name: Server ${{ matrix.platform }}/${{ matrix.arch }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      PIHUB_RELEASE_REF: ${{ needs.validate.outputs.ref }}
+      PIHUB_RELEASE_TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
+      PIHUB_RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+          - runner: macos-15-intel
+            platform: darwin
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - runner: windows-11-arm
+            platform: win32
+            arch: arm64
+          - runner: windows-2025
+            platform: win32
+            arch: x64
+    steps:
+      - name: Check out validated source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate immutable release source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly tag="${PIHUB_RELEASE_REF#refs/tags/}"
+          if [[ ! "${PIHUB_RELEASE_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ || "$(git rev-parse HEAD)" != "${PIHUB_RELEASE_COMMIT}" ]]; then
+            echo "The checked out release commit is invalid" >&2
+            exit 1
+          fi
+          remote_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          remote_object="$(jq -er '.object.sha' <<<"${remote_ref}")"
+          remote_type="$(jq -er '.object.type' <<<"${remote_ref}")"
+          if [[ "${remote_object}" != "${PIHUB_RELEASE_TAG_OBJECT}" ]]; then
+            echo "The release tag object moved after validation" >&2
+            exit 1
+          fi
+          peel_depth=0
+          while [[ "${remote_type}" == "tag" ]]; do
+            ((peel_depth += 1))
+            ((peel_depth <= 4)) || { echo "The release tag nesting is invalid" >&2; exit 1; }
+            remote_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
+            remote_object="$(jq -er '.object.sha' <<<"${remote_tag}")"
+            remote_type="$(jq -er '.object.type' <<<"${remote_tag}")"
+          done
+          if [[ "${remote_type}" != "commit" || "${remote_object}" != "${PIHUB_RELEASE_COMMIT}" ]]; then
+            echo "The release tag commit moved after validation" >&2
+            exit 1
+          fi
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${PIHUB_RELEASE_COMMIT}...main" --jq '.status')"
+          if [[ "${comparison}" != "ahead" && "${comparison}" != "identical" ]]; then
+            echo "The validated release commit is no longer reachable from main" >&2
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            extensions/package-lock.json
+
+      - name: Verify the locked Server and extension supply chains
+        run: |
+          node scripts/verify-server-lock.mjs
+          node scripts/default-extension-bundle.mjs
+
+      - name: Install locked Server dependencies
+        run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
+
+      - name: Prepare Linux user service manager
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly uid="$(id -u)"
+          sudo loginctl enable-linger "${USER}"
+          sudo systemctl start "user@${uid}.service"
+          test -S "/run/user/${uid}/bus"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/${uid}"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus"
+          } >> "${GITHUB_ENV}"
+
+      - name: Validate native Server service integration
+        run: |
+          node --test server/bin/pihub-server-install.test.mjs server/bin/pihub-service-platform-smoke.test.mjs server/bin/bounded-log.test.mjs server/bin/server-runtime-environment.test.mjs
+          node server/bin/pihub-service-platform-smoke.js
+
+      - name: Build the standalone Server release
+        run: |
+          npm run server:build
+          node scripts/build-server-release.mjs --platform "${{ matrix.platform }}" --arch "${{ matrix.arch }}"
+
+      - name: Verify Server release inventory and privacy
+        run: node scripts/verify-server-release.mjs --directory release-artifacts
+
+      - name: Smoke the relocated standalone Server
+        run: >-
+          node scripts/smoke-server-resource.mjs
+          --archive "release-artifacts/pihub-server-${{ needs.validate.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz"
+
+      - name: Upload Server release components
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: server-release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  build-desktop-release:
+    name: ${{ matrix.name }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    environment: pihub-release-signing
+    permissions:
+      contents: read
+    env:
+      CI: true
+      PIHUB_RELEASE_REF: ${{ needs.validate.outputs.ref }}
+      PIHUB_RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      PIHUB_RELEASE_TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
+      PIHUB_RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+      PIHUB_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      PIHUB_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/pihub-desktop-v1.json
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: macos-universal
+            name: macOS universal DMG
+            runner: macos-15
+            platform: darwin
+            arch: universal
+            rustTargets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauriArgs: --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.release.generated.conf.json
+          - id: windows-x86_64
+            name: Windows x64 NSIS
+            runner: windows-2025
+            platform: windows
+            arch: x86_64
+            rustTargets: x86_64-pc-windows-msvc
+            signToolArch: x64
+            tauriArgs: --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.release.generated.conf.json
+          - id: windows-aarch64
+            name: Windows ARM64 NSIS
+            runner: windows-11-arm
+            platform: windows
+            arch: aarch64
+            rustTargets: aarch64-pc-windows-msvc
+            signToolArch: arm64
+            tauriArgs: --target aarch64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.release.generated.conf.json
+          - id: linux-x86_64
+            name: Linux x64 AppImage and deb
+            runner: ubuntu-22.04
+            platform: linux
+            arch: x86_64
+            rustTargets: x86_64-unknown-linux-gnu
+            linuxFilePattern: ELF 64-bit.*x86-64
+            debArch: amd64
+            tauriArgs: --target x86_64-unknown-linux-gnu --bundles appimage,deb --config src-tauri/tauri.release.generated.conf.json
+          - id: linux-aarch64
+            name: Linux ARM64 AppImage and deb
+            runner: ubuntu-24.04-arm
+            platform: linux
+            arch: aarch64
+            rustTargets: aarch64-unknown-linux-gnu
+            linuxFilePattern: ELF 64-bit.*ARM aarch64
+            debArch: arm64
+            tauriArgs: --target aarch64-unknown-linux-gnu --bundles appimage,deb --config src-tauri/tauri.release.generated.conf.json
+    steps:
+      - name: Check out validated source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate immutable release source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly tag="${PIHUB_RELEASE_REF#refs/tags/}"
+          if [[ ! "${PIHUB_RELEASE_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ || "$(git rev-parse HEAD)" != "${PIHUB_RELEASE_COMMIT}" ]]; then
+            echo "The checked out release commit is invalid" >&2
+            exit 1
+          fi
+          remote_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          remote_object="$(jq -er '.object.sha' <<<"${remote_ref}")"
+          remote_type="$(jq -er '.object.type' <<<"${remote_ref}")"
+          if [[ "${remote_object}" != "${PIHUB_RELEASE_TAG_OBJECT}" ]]; then
+            echo "The release tag object moved after validation" >&2
+            exit 1
+          fi
+          peel_depth=0
+          while [[ "${remote_type}" == "tag" ]]; do
+            ((peel_depth += 1))
+            ((peel_depth <= 4)) || { echo "The release tag nesting is invalid" >&2; exit 1; }
+            remote_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
+            remote_object="$(jq -er '.object.sha' <<<"${remote_tag}")"
+            remote_type="$(jq -er '.object.type' <<<"${remote_tag}")"
+          done
+          if [[ "${remote_type}" != "commit" || "${remote_object}" != "${PIHUB_RELEASE_COMMIT}" ]]; then
+            echo "The release tag commit moved after validation" >&2
+            exit 1
+          fi
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${PIHUB_RELEASE_COMMIT}...main" --jq '.status')"
+          if [[ "${comparison}" != "ahead" && "${comparison}" != "identical" ]]; then
+            echo "The validated release commit is no longer reachable from main" >&2
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.89.0
+          targets: ${{ matrix.rustTargets }}
+
+      - name: Install Linux bundle dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run native desktop platform tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib --all-features
+
+      - name: Build unsigned release inputs
+        shell: bash
+        run: |
+          npm run build
+          node scripts/check-release-config.mjs --tag "${PIHUB_RELEASE_TAG}"
+
+      - name: Prepare updater and platform signing config
+        shell: bash
+        env:
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_THUMBPRINT || '' }}
+        run: |
+          node scripts/prepare-tauri-release.mjs src-tauri/tauri.release.generated.conf.json
+
+      - name: Install Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD -or -not $env:WINDOWS_CERTIFICATE_THUMBPRINT) {
+            throw "Windows Authenticode signing secrets are required"
+          }
+          $expectedThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT.Replace(" ", "").ToUpperInvariant()
+          if ($expectedThumbprint -notmatch '^[A-F0-9]{40}$') {
+            throw "WINDOWS_CERTIFICATE_THUMBPRINT must be a SHA-1 certificate thumbprint"
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "pihub-code-signing.pfx"
+          try {
+            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $imported = @(Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password)
+            $certificate = $imported | Where-Object { $_.Thumbprint -eq $expectedThumbprint } | Select-Object -First 1
+            if (-not $certificate -or -not $certificate.HasPrivateKey) {
+              throw "Imported Windows certificate does not match WINDOWS_CERTIFICATE_THUMBPRINT"
+            }
+            if ($certificate.NotBefore -gt (Get-Date) -or $certificate.NotAfter -lt (Get-Date)) {
+              throw "Windows signing certificate is outside its validity period"
+            }
+          } finally {
+            Remove-Item -Force $certificatePath -ErrorAction SilentlyContinue
+          }
+
+      - name: Build and sign desktop artifacts
+        id: tauri
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ runner.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+        with:
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          args: ${{ matrix.tauriArgs }}
+
+      - name: Collect signed desktop release files
+        env:
+          PIHUB_TAURI_ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: >-
+          node scripts/collect-tauri-release.mjs
+          --platform "${{ matrix.platform }}"
+          --arch "${{ matrix.arch }}"
+          --output desktop-release
+
+      - name: Verify macOS code signature, identity, Gatekeeper, and notarization
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_SIGNING_IDENTITY}" || -z "${APPLE_TEAM_ID}" || ! "${APPLE_TEAM_ID}" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "A valid Apple signing identity and Team ID are required" >&2
+            exit 1
+          fi
+
+          verify_app() {
+            local app="$1"
+            local signature_info
+            codesign --verify --deep --strict --verbose=4 "${app}" >/dev/null 2>&1
+            signature_info="$(codesign --display --verbose=4 "${app}" 2>&1)"
+            grep -F "Authority=${APPLE_SIGNING_IDENTITY}" <<<"${signature_info}" >/dev/null
+            grep -F "TeamIdentifier=${APPLE_TEAM_ID}" <<<"${signature_info}" >/dev/null
+            spctl --assess --type execute --verbose=4 "${app}" >/dev/null 2>&1
+            xcrun stapler validate "${app}" >/dev/null
+          }
+
+          dmg_files=(desktop-release/*.dmg)
+          updater_files=(desktop-release/*.app.tar.gz)
+          [[ "${#dmg_files[@]}" == "1" && -f "${dmg_files[0]}" && "${#updater_files[@]}" == "1" && -f "${updater_files[0]}" ]] || {
+            echo "Expected exactly one macOS DMG and one updater archive" >&2
+            exit 1
+          }
+          readonly dmg="${dmg_files[0]}"
+          readonly updater="${updater_files[0]}"
+          codesign --verify --deep --strict --verbose=4 "${dmg}" >/dev/null 2>&1
+          spctl --assess --type open --context context:primary-signature --verbose=4 "${dmg}" >/dev/null 2>&1
+          xcrun stapler validate "${dmg}" >/dev/null
+
+          readonly mount_point="$(mktemp -d "${RUNNER_TEMP}/pihub-dmg.XXXXXX")"
+          readonly updater_directory="$(mktemp -d "${RUNNER_TEMP}/pihub-updater.XXXXXX")"
+          mounted=false
+          cleanup() {
+            if [[ "${mounted}" == "true" ]]; then
+              hdiutil detach "${mount_point}" >/dev/null
+            fi
+          }
+          trap cleanup EXIT
+          hdiutil attach "${dmg}" -readonly -nobrowse -mountpoint "${mount_point}" >/dev/null
+          mounted=true
+          readonly dmg_app_count="$(find "${mount_point}" -type d -name '*.app' -prune | wc -l | tr -d ' ')"
+          [[ "${dmg_app_count}" == "1" ]] || { echo "DMG must contain exactly one application" >&2; exit 1; }
+          verify_app "$(find "${mount_point}" -type d -name '*.app' -prune -print -quit)"
+          hdiutil detach "${mount_point}" >/dev/null
+          mounted=false
+
+          tar --extract --gzip --file "${updater}" --directory "${updater_directory}"
+          readonly updater_app_count="$(find "${updater_directory}" -type d -name '*.app' -prune | wc -l | tr -d ' ')"
+          [[ "${updater_app_count}" == "1" ]] || { echo "Updater archive must contain exactly one application" >&2; exit 1; }
+          verify_app "$(find "${updater_directory}" -type d -name '*.app' -prune -print -quit)"
+
+      - name: Verify Windows Authenticode identity and trusted timestamp
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        run: |
+          $expectedThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT.Replace(" ", "").ToUpperInvariant()
+          if ($expectedThumbprint -notmatch '^[A-F0-9]{40}$') {
+            throw "WINDOWS_CERTIFICATE_THUMBPRINT must be a SHA-1 certificate thumbprint"
+          }
+
+          $signToolCommand = Get-Command signtool.exe -ErrorAction SilentlyContinue
+          if ($signToolCommand) {
+            $signTool = $signToolCommand.Source
+          } else {
+            $kitsRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+            $signToolArchitecture = "${{ matrix.signToolArch }}"
+            $signToolPattern = "\\$([regex]::Escape($signToolArchitecture))\\signtool\.exe$"
+            $signTool = Get-ChildItem -LiteralPath $kitsRoot -Filter signtool.exe -Recurse -ErrorAction Stop |
+              Where-Object { $_.FullName -match $signToolPattern } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $signTool) {
+            throw "signtool.exe is required for release verification"
+          }
+
+          $installers = @(Get-ChildItem -LiteralPath desktop-release -File -Filter '*-setup.exe')
+          $updaterArchives = @(Get-ChildItem -LiteralPath desktop-release -File -Filter '*.nsis.zip')
+          if ($installers.Count -ne 1 -or $updaterArchives.Count -ne 1) {
+            throw "Expected exactly one NSIS installer and one updater archive"
+          }
+          $updaterDirectory = Join-Path $env:RUNNER_TEMP ("pihub-nsis-" + [Guid]::NewGuid().ToString("N"))
+          Expand-Archive -LiteralPath $updaterArchives[0].FullName -DestinationPath $updaterDirectory
+          $embeddedInstallers = @(Get-ChildItem -LiteralPath $updaterDirectory -Recurse -File -Filter '*.exe')
+          if ($embeddedInstallers.Count -lt 1) {
+            throw "The NSIS updater archive contains no executable"
+          }
+
+          foreach ($file in @($installers) + @($embeddedInstallers)) {
+            & $signTool verify /pa /all /v $file.FullName *> $null
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool rejected a Windows release executable"
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "Windows release executable does not have a valid Authenticode signature"
+            }
+            if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint.ToUpperInvariant() -ne $expectedThumbprint) {
+              throw "Windows release executable was signed by an unexpected certificate"
+            }
+            if (-not $signature.TimeStamperCertificate) {
+              throw "Windows release executable is missing a trusted timestamp"
+            }
+          }
+
+      - name: Remove Windows signing certificate
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE_THUMBPRINT) {
+            return
+          }
+          $thumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT.Replace(" ", "").ToUpperInvariant()
+          if ($thumbprint -match '^[A-F0-9]{40}$') {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Verify Linux release file types
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly appimage_count="$(find desktop-release -maxdepth 1 -type f -name '*.AppImage' | wc -l | tr -d ' ')"
+          readonly deb_count="$(find desktop-release -maxdepth 1 -type f -name '*.deb' | wc -l | tr -d ' ')"
+          readonly updater_count="$(find desktop-release -maxdepth 1 -type f -name '*.AppImage.tar.gz' | wc -l | tr -d ' ')"
+          [[ "${appimage_count}" == "1" && "${deb_count}" == "1" && "${updater_count}" == "1" ]] || {
+            echo "Expected exactly one AppImage, deb, and AppImage updater archive" >&2
+            exit 1
+          }
+          readonly appimage="$(find desktop-release -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          readonly deb="$(find desktop-release -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          readonly updater="$(find desktop-release -maxdepth 1 -type f -name '*.AppImage.tar.gz' -print -quit)"
+          test -x "${appimage}"
+          file --brief "${appimage}" | grep -Eq '${{ matrix.linuxFilePattern }}'
+          test "$(dpkg-deb --field "${deb}" Architecture)" = "${{ matrix.debArch }}"
+          dpkg-deb --info "${deb}" >/dev/null
+          gzip --test "${updater}"
+          tar --list --gzip --file "${updater}" | grep -Eq '\.AppImage$'
+
+      - name: Scan desktop release files for private data
+        run: node scripts/privacy-scan.mjs desktop-release
+
+      # The assembly job cryptographically verifies every Tauri updater signature.
+
+      - name: Upload desktop release components
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-release-${{ matrix.id }}
+          path: desktop-release/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  assemble-release:
+    name: Sign and assemble the release candidate
+    needs:
+      - validate
+      - build-server-release
+      - build-desktop-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: pihub-release-signing
+    permissions:
+      contents: read
+    env:
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      PIHUB_RELEASE_REF: ${{ needs.validate.outputs.ref }}
+      PIHUB_RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      PIHUB_RELEASE_TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
+      PIHUB_RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+    steps:
+      - name: Check out validated source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install manifest tooling
+        run: |
+          node scripts/verify-server-lock.mjs
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --prefix server --ignore-scripts --no-audit --no-fund
+
+      - name: Download all Server release components
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: server-release-*
+          path: server-artifacts
+          merge-multiple: true
+
+      - name: Download all desktop release components
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: desktop-release-*
+          path: desktop-artifacts
+          merge-multiple: true
+
+      - name: Revalidate immutable release source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly tag="${PIHUB_RELEASE_REF#refs/tags/}"
+          if [[ ! "${PIHUB_RELEASE_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ || "$(git rev-parse HEAD)" != "${PIHUB_RELEASE_COMMIT}" ]]; then
+            echo "The checked out release commit is invalid" >&2
+            exit 1
+          fi
+          remote_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          remote_object="$(jq -er '.object.sha' <<<"${remote_ref}")"
+          remote_type="$(jq -er '.object.type' <<<"${remote_ref}")"
+          if [[ "${remote_object}" != "${PIHUB_RELEASE_TAG_OBJECT}" ]]; then
+            echo "The release tag object moved after validation" >&2
+            exit 1
+          fi
+          peel_depth=0
+          while [[ "${remote_type}" == "tag" ]]; do
+            ((peel_depth += 1))
+            ((peel_depth <= 4)) || { echo "The release tag nesting is invalid" >&2; exit 1; }
+            remote_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
+            remote_object="$(jq -er '.object.sha' <<<"${remote_tag}")"
+            remote_type="$(jq -er '.object.type' <<<"${remote_tag}")"
+          done
+          if [[ "${remote_type}" != "commit" || "${remote_object}" != "${PIHUB_RELEASE_COMMIT}" ]]; then
+            echo "The release tag commit moved after validation" >&2
+            exit 1
+          fi
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${PIHUB_RELEASE_COMMIT}...main" --jq '.status')"
+          if [[ "${comparison}" != "ahead" && "${comparison}" != "identical" ]]; then
+            echo "The validated release commit is no longer reachable from main" >&2
+            exit 1
+          fi
+
+      - name: Sign Server manifest
+        env:
+          PIHUB_SERVER_RELEASE_PRIVATE_KEY: ${{ secrets.PIHUB_SERVER_RELEASE_PRIVATE_KEY }}
+          PIHUB_SERVER_RELEASE_PRIVATE_KEY_PASSWORD: ${{ secrets.PIHUB_SERVER_RELEASE_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/sign-server-release.mjs server-artifacts
+
+      - name: Assemble release
+        run: |
+          node scripts/assemble-release.mjs \
+            --desktop desktop-artifacts \
+            --server server-artifacts \
+            --output publish-artifacts \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${PIHUB_RELEASE_TAG}" \
+            --pub-date "${{ needs.validate.outputs.pub_date }}"
+
+      - name: Sign and finalize desktop update manifest
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${TAURI_SIGNING_PRIVATE_KEY}"
+          npx --no-install tauri signer sign publish-artifacts/pihub-desktop-v1.json
+          node scripts/finalize-desktop-release.mjs --release publish-artifacts
+
+      - name: Scan the finalized release candidate
+        run: |
+          node scripts/privacy-scan.mjs publish-artifacts
+
+      - name: Upload the assembled release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publish-release-${{ needs.validate.outputs.commit }}
+          path: publish-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  attest-release:
+    name: Attest the complete release candidate
+    needs:
+      - validate
+      - assemble-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      PIHUB_RELEASE_REF: ${{ needs.validate.outputs.ref }}
+      PIHUB_RELEASE_TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
+      PIHUB_RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+    steps:
+      - name: Download the assembled release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: publish-release-${{ needs.validate.outputs.commit }}
+          path: publish-artifacts
+
+      - name: Revalidate immutable release source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly tag="${PIHUB_RELEASE_REF#refs/tags/}"
+          if [[ ! "${PIHUB_RELEASE_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "The release ref is invalid" >&2
+            exit 1
+          fi
+          remote_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          remote_object="$(jq -er '.object.sha' <<<"${remote_ref}")"
+          remote_type="$(jq -er '.object.type' <<<"${remote_ref}")"
+          if [[ "${remote_object}" != "${PIHUB_RELEASE_TAG_OBJECT}" ]]; then
+            echo "The release tag object moved after validation" >&2
+            exit 1
+          fi
+          peel_depth=0
+          while [[ "${remote_type}" == "tag" ]]; do
+            ((peel_depth += 1))
+            ((peel_depth <= 4)) || { echo "The release tag nesting is invalid" >&2; exit 1; }
+            remote_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
+            remote_object="$(jq -er '.object.sha' <<<"${remote_tag}")"
+            remote_type="$(jq -er '.object.type' <<<"${remote_tag}")"
+          done
+          if [[ "${remote_type}" != "commit" || "${remote_object}" != "${PIHUB_RELEASE_COMMIT}" ]]; then
+            echo "The release tag commit moved after validation" >&2
+            exit 1
+          fi
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${PIHUB_RELEASE_COMMIT}...main" --jq '.status')"
+          if [[ "${comparison}" != "ahead" && "${comparison}" != "identical" ]]; then
+            echo "The validated release commit is no longer reachable from main" >&2
+            exit 1
+          fi
+
+      - name: Attest every signed release asset
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: publish-artifacts/*
+
+  publish-draft:
+    name: Upload the single immutable release draft
+    needs:
+      - validate
+      - assemble-release
+      - attest-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: pihub-release-publishing
+    permissions:
+      contents: write
+    env:
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GITHUB_REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+      PIHUB_RELEASE_REF: ${{ needs.validate.outputs.ref }}
+      PIHUB_RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      PIHUB_RELEASE_TAG_OBJECT: ${{ needs.validate.outputs.tag_object }}
+      PIHUB_RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+    steps:
+      - name: Download the attested release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: publish-release-${{ needs.validate.outputs.commit }}
+          path: publish-artifacts
+
+      - name: Verify publication target and immutable release source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REPOSITORY}" != "yourChainGod/pihub" ]]; then
+            echo "Release repository must be exactly yourChainGod/pihub" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REPOSITORY_VISIBILITY}" != "public" ]]; then
+            echo "Anonymous desktop and Server update checks require a public release repository" >&2
+            exit 1
+          fi
+          readonly tag="${PIHUB_RELEASE_REF#refs/tags/}"
+          if [[ ! "${PIHUB_RELEASE_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ || "${tag}" != "${PIHUB_RELEASE_TAG}" ]]; then
+            echo "The release source is invalid" >&2
+            exit 1
+          fi
+          remote_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          remote_object="$(jq -er '.object.sha' <<<"${remote_ref}")"
+          remote_type="$(jq -er '.object.type' <<<"${remote_ref}")"
+          if [[ "${remote_object}" != "${PIHUB_RELEASE_TAG_OBJECT}" ]]; then
+            echo "The release tag object moved after validation" >&2
+            exit 1
+          fi
+          peel_depth=0
+          while [[ "${remote_type}" == "tag" ]]; do
+            ((peel_depth += 1))
+            ((peel_depth <= 4)) || { echo "The release tag nesting is invalid" >&2; exit 1; }
+            remote_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
+            remote_object="$(jq -er '.object.sha' <<<"${remote_tag}")"
+            remote_type="$(jq -er '.object.type' <<<"${remote_tag}")"
+          done
+          if [[ "${remote_type}" != "commit" || "${remote_object}" != "${PIHUB_RELEASE_COMMIT}" ]]; then
+            echo "The release tag commit moved after validation" >&2
+            exit 1
+          fi
+          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${PIHUB_RELEASE_COMMIT}...main" --jq '.status')"
+          if [[ "${comparison}" != "ahead" && "${comparison}" != "identical" ]]; then
+            echo "The validated release commit is no longer reachable from main" >&2
+            exit 1
+          fi
+
+      - name: Create or validate the immutable draft and upload assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly tag="${PIHUB_RELEASE_TAG}"
+          readonly commit="${PIHUB_RELEASE_COMMIT}"
+          readonly expected_list="${RUNNER_TEMP}/expected-assets.txt"
+          readonly current_list="${RUNNER_TEMP}/current-assets.txt"
+          readonly missing_list="${RUNNER_TEMP}/missing-assets.txt"
+          readonly existing_directory="$(mktemp -d)"
+          readonly verify_directory="$(mktemp -d)"
+
+          assert_remote_source() {
+            local remote_ref remote_object remote_type remote_tag comparison peel_depth
+            remote_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+            remote_object="$(jq -er '.object.sha' <<<"${remote_ref}")"
+            remote_type="$(jq -er '.object.type' <<<"${remote_ref}")"
+            [[ "${remote_object}" == "${PIHUB_RELEASE_TAG_OBJECT}" ]] || {
+              echo "The release tag object moved during publication" >&2
+              return 1
+            }
+            peel_depth=0
+            while [[ "${remote_type}" == "tag" ]]; do
+              ((peel_depth += 1))
+              ((peel_depth <= 4)) || return 1
+              remote_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
+              remote_object="$(jq -er '.object.sha' <<<"${remote_tag}")"
+              remote_type="$(jq -er '.object.type' <<<"${remote_tag}")"
+            done
+            [[ "${remote_type}" == "commit" && "${remote_object}" == "${commit}" ]] || {
+              echo "The release tag commit moved during publication" >&2
+              return 1
+            }
+            comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${commit}...main" --jq '.status')"
+            [[ "${comparison}" == "ahead" || "${comparison}" == "identical" ]] || {
+              echo "The release commit is no longer reachable from main" >&2
+              return 1
+            }
+          }
+
+          list_assets() {
+            gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases/$1/assets?per_page=100" | jq -c '[.[][]]'
+          }
+
+          find publish-artifacts -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort > "${expected_list}"
+          if [[ ! -s "${expected_list}" ]]; then
+            echo "No release assets were assembled" >&2
+            exit 1
+          fi
+          if grep -Ev '^[A-Za-z0-9][A-Za-z0-9._-]*$' "${expected_list}" | grep -q .; then
+            echo "Release assets contain an unsafe filename" >&2
+            exit 1
+          fi
+
+          assert_remote_source
+          releases_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          matching_releases="$(jq -c --arg tag "${tag}" '[.[][] | select(.tag_name == $tag)]' <<<"${releases_json}")"
+          readonly release_count="$(jq -r 'length' <<<"${matching_releases}")"
+          if [[ "${release_count}" == "1" ]]; then
+            release_json="$(jq -c '.[0]' <<<"${matching_releases}")"
+            jq -e \
+              --arg tag "${tag}" \
+              --arg commit "${commit}" \
+              '.tag_name == $tag and .target_commitish == $commit and .draft == true and .prerelease == false' \
+              <<<"${release_json}" >/dev/null
+            readonly release_id="$(jq -er '.id' <<<"${release_json}")"
+            assets_json="$(list_assets "${release_id}")"
+            jq -e 'group_by(.name) | all(length == 1)' <<<"${assets_json}" >/dev/null
+            jq -r '.[].name' <<<"${assets_json}" | LC_ALL=C sort > "${current_list}"
+            if [[ -s "${current_list}" ]] && comm -23 "${current_list}" "${expected_list}" | grep -q .; then
+              echo "Existing draft contains an unexpected asset; refusing to modify it" >&2
+              exit 1
+            fi
+            while IFS= read -r asset; do
+              [[ -n "${asset}" ]] || continue
+              asset_id="$(jq -er --arg name "${asset}" '[.[] | select(.name == $name)] | if length == 1 then .[0].id else error("asset lookup is ambiguous") end' <<<"${assets_json}")"
+              gh api -H "Accept: application/octet-stream" \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "${existing_directory}/${asset}"
+              published_hash="$(sha256sum "${existing_directory}/${asset}" | cut -d ' ' -f 1)"
+              candidate_hash="$(sha256sum "publish-artifacts/${asset}" | cut -d ' ' -f 1)"
+              if [[ "${published_hash}" != "${candidate_hash}" ]]; then
+                echo "Existing draft asset differs from this build: ${asset}" >&2
+                exit 1
+              fi
+            done < "${current_list}"
+          elif [[ "${release_count}" == "0" ]]; then
+            release_json="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+              -f tag_name="${tag}" \
+              -f target_commitish="${commit}" \
+              -f name="PiHub ${tag}" \
+              -f body='Signed PiHub Desktop and standalone Server artifacts. Keep this release as a draft until native install, update, rollback, and privacy verification pass.' \
+              -F draft=true \
+              -F prerelease=false)"
+            readonly release_id="$(jq -er '.id' <<<"${release_json}")"
+            : > "${current_list}"
+          else
+            echo "Multiple releases use the requested tag; refusing publication" >&2
+            exit 1
+          fi
+          jq -e \
+            --arg tag "${tag}" \
+            --arg commit "${commit}" \
+            '.tag_name == $tag and .target_commitish == $commit and .draft == true and .prerelease == false' \
+            <<<"${release_json}" >/dev/null
+
+          comm -23 "${expected_list}" "${current_list}" > "${missing_list}"
+          while IFS= read -r asset; do
+            [[ -n "${asset}" ]] || continue
+            encoded_asset="$(jq -rn --arg value "${asset}" '$value | @uri')"
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@publish-artifacts/${asset}" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded_asset}" >/dev/null
+          done < "${missing_list}"
+
+          assets_json="$(list_assets "${release_id}")"
+          jq -e 'group_by(.name) | all(length == 1)' <<<"${assets_json}" >/dev/null
+          jq -r '.[].name' <<<"${assets_json}" | LC_ALL=C sort > "${current_list}"
+          diff -u "${expected_list}" "${current_list}"
+
+          while IFS= read -r asset; do
+            [[ -n "${asset}" ]] || continue
+            asset_id="$(jq -er --arg name "${asset}" '[.[] | select(.name == $name)] | if length == 1 then .[0].id else error("asset lookup is ambiguous") end' <<<"${assets_json}")"
+            gh api -H "Accept: application/octet-stream" \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "${verify_directory}/${asset}"
+          done < "${current_list}"
+          (cd "${verify_directory}" && sha256sum --check "${GITHUB_WORKSPACE}/publish-artifacts/RELEASE-SHA256SUMS")
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")"
+          jq -e \
+            --arg tag "${tag}" \
+            --arg commit "${commit}" \
+            '.tag_name == $tag and .target_commitish == $commit and .draft == true and .prerelease == false' \
+            <<<"${release_json}" >/dev/null
+          assert_remote_source

@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "PiHub main window capabilities",
+  "windows": ["main", "device-*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "notification:default",
+    "process:deny-exit",
+    "process:deny-restart",
+    "updater:deny-check",
+    "updater:deny-download",
+    "updater:deny-install",
+    "updater:deny-download-and-install"
+  ]
+}

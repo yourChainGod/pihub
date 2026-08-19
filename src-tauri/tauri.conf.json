@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PiHub Desktop",
+  "mainBinaryName": "pihub-desktop",
+  "version": "0.0.1",
+  "identifier": "io.github.yourchaingod.pihub.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [{
+      "label": "main",
+      "title": "PiHub",
+      "width": 1180,
+      "height": 800,
+      "minWidth": 720,
+      "minHeight": 620,
+      "transparent": false,
+      "backgroundColor": "#090b0d"
+    }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "PiHub Contributors",
+    "category": "DeveloperTool",
+    "shortDescription": "Private desktop hub for Pi agent devices",
+    "longDescription": "Connect to and manage Pi agent devices over a private Tailscale network.",
+    "license": "MIT",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

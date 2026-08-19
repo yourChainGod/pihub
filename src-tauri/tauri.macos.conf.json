@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [{
+      "label": "main",
+      "title": "PiHub",
+      "width": 1180,
+      "height": 800,
+      "minWidth": 720,
+      "minHeight": 620,
+      "titleBarStyle": "Overlay",
+      "hiddenTitle": true,
+      "transparent": false,
+      "backgroundColor": "#090b0d"
+    }]
+  },
+  "bundle": {
+    "targets": ["dmg"],
+    "macOS": {
+      "bundleName": "PiHub Desktop",
+      "minimumSystemVersion": "11.0",
+      "hardenedRuntime": true,
+      "dmg": {
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
+      }
+    }
+  }
+}

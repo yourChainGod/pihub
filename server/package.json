@@ -1,0 +1,94 @@
+{
+  "name": "@pihub/server",
+  "version": "0.0.1",
+  "description": "Tailnet-only Pi agent server for PiHub",
+  "homepage": "https://github.com/yourChainGod/pihub#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourChainGod/pihub.git",
+    "directory": "server"
+  },
+  "bugs": {
+    "url": "https://github.com/yourChainGod/pihub/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "pihub-server": "bin/pi-web.js",
+    "pihub-server-install": "bin/pihub-server-install.js",
+    "pihub-server-service": "bin/pihub-server-install.js",
+    "pihub-auth-admin": "bin/pihub-auth-admin.js",
+    "pihub-sign-request": "bin/pihub-sign-request.js"
+  },
+  "files": [
+    "bin",
+    "lib/atomic-file.ts",
+    "lib/default-extensions.ts",
+    "lib/pihub-auth-shared.ts",
+    "lib/pihub-auth-store.ts",
+    "lib/release-manifest.ts",
+    "lib/server-release.ts",
+    "lib/server-update-ipc.ts",
+    "lib/server-update-runtime.ts",
+    "lib/update-engine.ts",
+    "lib/session-ownership.ts",
+    ".next",
+    "!.next/cache",
+    "!.next/dev",
+    "!.next/diagnostics",
+    "!.next/trace",
+    "!.next/trace-build",
+    "!.next/types",
+    "!.next/**/*.js.map",
+    "next.config.ts",
+    "package.json"
+  ],
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p 30141",
+    "dev:headless": "next dev -H 127.0.0.1 -p 30141",
+    "build": "node ../scripts/build-portable-server.mjs",
+    "start": "next start -H 127.0.0.1 -p 30141",
+    "start:headless": "node bin/pi-web.js --no-open",
+    "lint": "eslint .",
+    "test": "node --experimental-strip-types --test \"app/**/*.test.mjs\" \"bin/**/*.test.mjs\" \"lib/**/*.test.mjs\""
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.2",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@earendil-works/pi-tui": "0.84.2",
+    "@lydell/node-pty": "1.2.0-beta.15",
+    "busboy": "1.6.0",
+    "jiti": "2.7.0",
+    "js-yaml": "5.2.3",
+    "mammoth": "1.12.0",
+    "next": "16.3.1",
+    "proper-lockfile": "4.1.2",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "remark-frontmatter": "5.0.0",
+    "tar": "7.5.22",
+    "undici": "8.10.0"
+  },
+  "devDependencies": {
+    "@threema/wasm-minisign-verify": "0.2.0-rc.1",
+    "@types/busboy": "^1.5.4",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.1",
+    "katex": "^0.16.47",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "typescript": "^5"
+  }
+}

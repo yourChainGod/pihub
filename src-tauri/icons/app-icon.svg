@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="118" y1="82" x2="910" y2="944" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#20262D"/>
+      <stop offset="1" stop-color="#0B0E12"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="242" y1="220" x2="790" y2="804" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF9A6E"/>
+      <stop offset="1" stop-color="#F05236"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(92 92) scale(.82)">
+  <rect width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <circle cx="512" cy="512" r="304" fill="#151A20" stroke="#303943" stroke-width="8"/>
+  <path d="M512 232v560M232 512h560" stroke="#39434D" stroke-width="12" stroke-linecap="round" opacity=".7"/>
+  <path d="M512 286c125 0 226 101 226 226S637 738 512 738 286 637 286 512s101-226 226-226Z" fill="none" stroke="url(#signal)" stroke-width="28"/>
+  <circle cx="512" cy="512" r="106" fill="url(#signal)"/>
+  <path d="M430 422c0-10 8-18 18-18h164v42h-30v102c0 28 13 45 40 51v42c-56-4-84-36-84-92V446h-48v170h-46V446h-32v-24h18Z" fill="#FFF7F3"/>
+  <circle cx="728" cy="296" r="26" fill="#55C7A5"/>
+  <circle cx="296" cy="728" r="26" fill="#64A9FF"/>
+  </g>
+</svg>

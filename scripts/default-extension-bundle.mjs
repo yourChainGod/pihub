@@ -1,0 +1,775 @@
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+import { verifyServerLock } from "./verify-server-lock.mjs";
+import { prepareSecureNpmEnvironment } from "./secure-npm-environment.mjs";
+
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+
+export const DEFAULT_EXTENSION_SOURCE_DIRECTORY = path.join(repositoryRoot, "extensions");
+export const DEFAULT_EXTENSION_NOTICE_FILE = "THIRD_PARTY_NOTICES.extensions.txt";
+export const DEFAULT_EXTENSION_INVENTORY_SCHEMA_VERSION = 1;
+export const DEFAULT_EXTENSION_LOCK_SHA256 = "fd91e25f2d4f3219701032d9aec6ef6f7f2496c3a0f3bfb22b7371c90ee3962c";
+export const DEFAULT_EXTENSION_PACKAGES = Object.freeze([
+  Object.freeze({ name: "@ff-labs/pi-fff", version: "0.10.5" }),
+  Object.freeze({ name: "pi-simplify", version: "0.2.3" }),
+  Object.freeze({ name: "@gotgenes/pi-permission-system", version: "26.3.0" }),
+  Object.freeze({ name: "@eko24ive/pi-ask", version: "1.2.0" }),
+  Object.freeze({ name: "@gotgenes/pi-subagents", version: "19.3.2" }),
+]);
+export const DEFAULT_EXTENSION_RESOURCE_LAYOUT = Object.freeze({
+  "@ff-labs/pi-fff": Object.freeze({ extensions: Object.freeze(["src/index.ts"]) }),
+  "pi-simplify": Object.freeze({ extensions: Object.freeze(["dist/index.js"]) }),
+  "@gotgenes/pi-permission-system": Object.freeze({ extensions: Object.freeze(["src/index.ts"]) }),
+  "@eko24ive/pi-ask": Object.freeze({
+    extensions: Object.freeze(["src/index.ts"]),
+    skills: Object.freeze(["skills"]),
+  }),
+  "@gotgenes/pi-subagents": Object.freeze({ extensions: Object.freeze(["src/index.ts"]) }),
+});
+
+const EXPECTED_NODE_ENGINE = ">=22.19.0 <23";
+const HOST_PI_VERSION = "0.84.2";
+const HOST_PI_PACKAGES = Object.freeze([
+  "@earendil-works/pi-ai",
+  "@earendil-works/pi-coding-agent",
+  "@earendil-works/pi-tui",
+]);
+const LOCKED_PI_PACKAGES = new Set([
+  ...HOST_PI_PACKAGES,
+  "@earendil-works/pi-agent-core",
+  "@earendil-works/pi-client",
+  "@earendil-works/pi-protocol",
+  "@earendil-works/pi-telemetry",
+]);
+export {
+  HOST_PI_PACKAGES as DEFAULT_EXTENSION_HOST_PI_PACKAGES,
+  HOST_PI_VERSION as DEFAULT_EXTENSION_HOST_PI_VERSION,
+};
+const EXPECTED_PI_PEERS = Object.freeze({
+  "@ff-labs/pi-fff": Object.freeze({
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+  }),
+  "pi-simplify": Object.freeze({
+    "@earendil-works/pi-ai": ">=0.74.0",
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@earendil-works/pi-tui": ">=0.74.0",
+  }),
+  "@gotgenes/pi-permission-system": Object.freeze({
+    "@earendil-works/pi-coding-agent": ">=0.79.0",
+    "@earendil-works/pi-tui": ">=0.79.0",
+  }),
+  "@eko24ive/pi-ask": Object.freeze({
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+  }),
+  "@gotgenes/pi-subagents": Object.freeze({
+    "@earendil-works/pi-ai": ">=0.75.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.5",
+    "@earendil-works/pi-tui": ">=0.75.0",
+  }),
+});
+const ALLOWED_PHYSICAL_INSTALL_SCRIPTS = new Map([
+  ["tree-sitter-bash", "0.25.1"],
+]);
+const AUDITED_PRIVACY_FINDINGS = new Map([
+  [
+    "node_modules/@gotgenes/pi-subagents/CHANGELOG.md",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "a25b7a31b8843b6d86ca02fe8f13bd49044dd2f2715aad0eed9828fa2ac769aa",
+    }),
+  ],
+  [
+    "node_modules/zod/src/v4/mini/tests/string.test.ts",
+    Object.freeze({
+      rules: new Set(["jwt"]),
+      sha256: "efb9ef22f2179e700a2033edd4e1e03a6fe4f6b95fa4bc0bd29223065e1ec0a0",
+    }),
+  ],
+]);
+const MAX_JSON_BYTES = 8 * 1024 * 1024;
+const MAX_FILES = 20_000;
+const MAX_FILE_BYTES = 1024 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 1024 * 1024 * 1024;
+const MAX_LICENSE_BYTES = 1024 * 1024;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const PI_PACKAGE_PREFIX = "@earendil-works/pi-";
+const CONTROL_CHARACTERS = /\p{Cc}/u;
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value, expected) {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === expected.length && keys.every((key) => expected.includes(key));
+}
+
+function comparePortable(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort(comparePortable)
+      .map((key) => [key, canonicalize(value[key])]),
+  );
+}
+
+export function canonicalExtensionJson(value) {
+  return JSON.stringify(canonicalize(value));
+}
+
+function readRegularFile(filename, description, maxBytes = MAX_JSON_BYTES) {
+  const info = fs.lstatSync(filename, { throwIfNoEntry: false });
+  if (!info?.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size <= 0 || info.size > maxBytes) {
+    throw new Error(`${description} must be a bounded regular file`);
+  }
+  return fs.readFileSync(filename, "utf8");
+}
+
+function readFormattedJson(filename, description) {
+  const source = readRegularFile(filename, description);
+  let value;
+  try {
+    value = JSON.parse(source);
+  } catch {
+    throw new Error(`${description} is not valid JSON`);
+  }
+  if (`${JSON.stringify(value, null, 2)}\n` !== source) {
+    throw new Error(`${description} must use deterministic two-space JSON without duplicate keys`);
+  }
+  return value;
+}
+
+function expectedDependencies() {
+  return Object.fromEntries(DEFAULT_EXTENSION_PACKAGES.map(({ name, version }) => [name, version]));
+}
+
+function exactDependencies(value) {
+  const expected = expectedDependencies();
+  return isRecord(value)
+    && Object.keys(value).length === DEFAULT_EXTENSION_PACKAGES.length
+    && DEFAULT_EXTENSION_PACKAGES.every(({ name, version }) => value[name] === version)
+    && Object.keys(value).every((name) => expected[name] === value[name]);
+}
+
+function exactStringMap(value, expected) {
+  return isRecord(value)
+    && Object.keys(value).length === Object.keys(expected).length
+    && Object.entries(expected).every(([name, version]) => value[name] === version);
+}
+
+function parseVersion(value, description) {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value);
+  if (!match) throw new Error(`${description} must be an exact stable SemVer version`);
+  return match.slice(1).map(Number);
+}
+
+function compareVersion(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+function satisfiesSupportedRange(version, range) {
+  const candidate = parseVersion(version, "Host Pi version");
+  if (range === "*") return true;
+  if (range.startsWith(">=")) {
+    return compareVersion(candidate, parseVersion(range.slice(2), "Pi peer range")) >= 0;
+  }
+  if (range.startsWith("^")) {
+    const lower = parseVersion(range.slice(1), "Pi peer range");
+    const upper = lower[0] > 0
+      ? [lower[0] + 1, 0, 0]
+      : lower[1] > 0
+        ? [0, lower[1] + 1, 0]
+        : [0, 0, lower[2] + 1];
+    return compareVersion(candidate, lower) >= 0 && compareVersion(candidate, upper) < 0;
+  }
+  return compareVersion(candidate, parseVersion(range, "Pi peer range")) === 0;
+}
+
+function validateManifest(manifest, expectedVersion) {
+  if (!isRecord(manifest)
+      || !hasExactKeys(manifest, ["name", "version", "private", "engines", "dependencies"])
+      || manifest.name !== "@pihub/default-extensions"
+      || manifest.version !== expectedVersion
+      || manifest.private !== true
+      || manifest.scripts !== undefined
+      || !hasExactKeys(manifest.engines, ["node"])
+      || manifest.engines.node !== EXPECTED_NODE_ENGINE
+      || !exactDependencies(manifest.dependencies)) {
+    throw new Error("Default extension package manifest contract is invalid");
+  }
+}
+
+function packagePath(root, packageName) {
+  return path.join(root, "node_modules", ...packageName.split("/"));
+}
+
+function packageLockKeyFor(relative) {
+  const segments = relative.split("/");
+  if (segments.at(-1) !== "package.json") return null;
+  let marker = -1;
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    if (segments[index] === "node_modules") marker = index;
+  }
+  if (marker === -1) return null;
+  const identity = segments.slice(marker + 1, -1);
+  if (identity.length === 1 && !identity[0].startsWith("@")) return segments.slice(0, -1).join("/");
+  if (identity.length === 2 && identity[0].startsWith("@")) return segments.slice(0, -1).join("/");
+  return null;
+}
+
+function packageNameFromLockKey(lockKey) {
+  const segments = lockKey.split("/");
+  const marker = segments.lastIndexOf("node_modules");
+  const identity = segments.slice(marker + 1);
+  return identity[0].startsWith("@") ? `${identity[0]}/${identity[1]}` : identity[0];
+}
+
+function verifyCommittedLock(manifest, lock) {
+  const lockForRegistryVerification = structuredClone(lock);
+  let omittedPeerIntegrityEntries = 0;
+  for (const [lockKey, entry] of Object.entries(lockForRegistryVerification.packages ?? {})) {
+    if (lockKey === "" || !isRecord(entry) || entry.integrity !== undefined) continue;
+    const packageName = packageNameFromLockKey(lockKey);
+    if (entry.peer !== true || !LOCKED_PI_PACKAGES.has(packageName) || entry.version !== HOST_PI_VERSION) {
+      throw new Error(`${lockKey} is missing its SHA-512 integrity`);
+    }
+    // npm v10 omits integrity only for redundant peer-solver records. These
+    // records are never materialized by `npm ci --omit=peer`; the clone keeps
+    // the shared registry validator strict without weakening the committed lock.
+    entry.integrity = `sha512-${Buffer.alloc(64).toString("base64")}`;
+    omittedPeerIntegrityEntries += 1;
+  }
+  const summary = {
+    ...verifyServerLock({ packageJson: manifest, packageLock: lockForRegistryVerification }),
+    omittedPeerIntegrityEntries,
+  };
+  if (lock.requires !== true || summary.linkEntries !== 0 || summary.linkTargetEntries !== 0 || summary.bundledEntries !== 0) {
+    throw new Error("Default extension lock must contain only official registry packages");
+  }
+  for (const { name, version } of DEFAULT_EXTENSION_PACKAGES) {
+    const entry = lock.packages[`node_modules/${name}`];
+    if (!isRecord(entry) || entry.version !== version || entry.peer === true) {
+      throw new Error(`Default extension lock does not pin ${name}@${version}`);
+    }
+  }
+  for (const [lockKey, entry] of Object.entries(lock.packages)) {
+    const packageName = lockKey === "" ? null : packageNameFromLockKey(lockKey);
+    if (packageName?.startsWith(PI_PACKAGE_PREFIX) !== true) continue;
+    if (!isRecord(entry) || entry.peer !== true || entry.version !== HOST_PI_VERSION) {
+      throw new Error(`Pi package lock entry must be an omitted ${HOST_PI_VERSION} peer: ${lockKey}`);
+    }
+    if (!LOCKED_PI_PACKAGES.has(packageName)) {
+      throw new Error(`Default extension lock contains an unreviewed Pi peer: ${packageName}`);
+    }
+  }
+  return summary;
+}
+
+function validatePortableRelative(relative) {
+  if (typeof relative !== "string"
+      || relative.length === 0
+      || relative.length > 1024
+      || relative.includes("\\")
+      || relative.startsWith("/")
+      || CONTROL_CHARACTERS.test(relative)
+      || relative.normalize("NFC") !== relative) {
+    throw new Error(`Default extension bundle contains an unsafe path: ${relative}`);
+  }
+  const segments = relative.split("/");
+  if (segments.length > 32 || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`Default extension bundle contains an unsafe path: ${relative}`);
+  }
+  return relative;
+}
+
+function collectRegularFiles(root) {
+  const files = [];
+  const portablePaths = new Set();
+  let totalBytes = 0;
+  const visit = (directory, relative) => {
+    const entries = fs.readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => comparePortable(left.name, right.name));
+    for (const entry of entries) {
+      const childRelative = validatePortableRelative(relative ? `${relative}/${entry.name}` : entry.name);
+      const portableKey = childRelative.toLowerCase();
+      if (portablePaths.has(portableKey)) {
+        throw new Error(`Default extension bundle contains a portable path collision: ${childRelative}`);
+      }
+      portablePaths.add(portableKey);
+      const child = path.join(directory, entry.name);
+      const info = fs.lstatSync(child);
+      if (info.isSymbolicLink()) throw new Error(`Default extension bundle contains a symbolic link: ${childRelative}`);
+      if (info.isDirectory()) {
+        visit(child, childRelative);
+        continue;
+      }
+      if (!info.isFile() || info.nlink !== 1) {
+        throw new Error(`Default extension bundle contains a hard link or special entry: ${childRelative}`);
+      }
+      if (info.size > MAX_FILE_BYTES) throw new Error(`Default extension bundle file is too large: ${childRelative}`);
+      totalBytes += info.size;
+      if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_TOTAL_BYTES) {
+        throw new Error("Default extension bundle exceeds the expanded-size limit");
+      }
+      files.push({ path: childRelative, size: info.size, source: child });
+      if (files.length > MAX_FILES) throw new Error("Default extension bundle contains too many files");
+    }
+  };
+  visit(root, "");
+  files.sort((left, right) => comparePortable(left.path, right.path));
+  return { files, totalBytes };
+}
+
+function sha256File(filename) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const input = fs.createReadStream(filename);
+    input.on("error", reject);
+    input.on("data", (chunk) => hash.update(chunk));
+    input.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+export function isAuditedDefaultExtensionPrivacyFinding(extensionRoot, finding) {
+  if (!isRecord(finding) || typeof finding.path !== "string" || typeof finding.rule !== "string") return false;
+  const relative = finding.path
+    .replace(/^archive!/, "")
+    .replace(/^extensions\//, "");
+  const audited = AUDITED_PRIVACY_FINDINGS.get(relative);
+  if (!audited?.rules.has(finding.rule)) return false;
+  const filename = path.join(extensionRoot, ...relative.split("/"));
+  const info = fs.lstatSync(filename, { throwIfNoEntry: false });
+  if (!info?.isFile() || info.isSymbolicLink() || info.nlink !== 1) return false;
+  return createHash("sha256").update(fs.readFileSync(filename)).digest("hex") === audited.sha256;
+}
+
+async function inventoryRecords(root) {
+  const tree = collectRegularFiles(root);
+  const files = tree.files.filter(({ path: relative }) => relative !== "inventory.json");
+  const records = [];
+  let totalBytes = 0;
+  for (const file of files) {
+    records.push({ path: file.path, size: file.size, sha256: await sha256File(file.source) });
+    totalBytes += file.size;
+  }
+  return { files: records, totalBytes };
+}
+
+export async function createDefaultExtensionInventory(root) {
+  const records = await inventoryRecords(root);
+  return {
+    schemaVersion: DEFAULT_EXTENSION_INVENTORY_SCHEMA_VERSION,
+    packages: DEFAULT_EXTENSION_PACKAGES.map(({ name, version }) => ({ name, version })),
+    files: records.files,
+    totalBytes: records.totalBytes,
+  };
+}
+
+function validateInventorySchema(inventory) {
+  if (!hasExactKeys(inventory, ["schemaVersion", "packages", "files", "totalBytes"])
+      || inventory.schemaVersion !== DEFAULT_EXTENSION_INVENTORY_SCHEMA_VERSION
+      || !Array.isArray(inventory.packages)
+      || inventory.packages.length !== DEFAULT_EXTENSION_PACKAGES.length
+      || !Array.isArray(inventory.files)
+      || inventory.files.length === 0
+      || inventory.files.length > MAX_FILES
+      || !Number.isSafeInteger(inventory.totalBytes)
+      || inventory.totalBytes < 0
+      || inventory.totalBytes > MAX_TOTAL_BYTES) {
+    throw new Error("Default extension inventory schema is invalid");
+  }
+  for (let index = 0; index < DEFAULT_EXTENSION_PACKAGES.length; index += 1) {
+    const actual = inventory.packages[index];
+    const expected = DEFAULT_EXTENSION_PACKAGES[index];
+    if (!hasExactKeys(actual, ["name", "version"])
+        || actual.name !== expected.name || actual.version !== expected.version) {
+      throw new Error("Default extension inventory package order is invalid");
+    }
+  }
+  let previous = null;
+  let totalBytes = 0;
+  for (const file of inventory.files) {
+    if (!hasExactKeys(file, ["path", "size", "sha256"])
+        || validatePortableRelative(file.path) !== file.path
+        || file.path === "inventory.json"
+        || (file.path !== "package.json" && file.path !== "package-lock.json" && !file.path.startsWith("node_modules/"))
+        || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_FILE_BYTES
+        || !SHA256_PATTERN.test(file.sha256)
+        || (previous !== null && comparePortable(previous, file.path) >= 0)) {
+      throw new Error("Default extension inventory file contract is invalid");
+    }
+    previous = file.path;
+    totalBytes += file.size;
+  }
+  if (totalBytes !== inventory.totalBytes) throw new Error("Default extension inventory total is invalid");
+}
+
+async function verifyInventory(root, inventory) {
+  validateInventorySchema(inventory);
+  const actual = await inventoryRecords(root);
+  if (actual.totalBytes !== inventory.totalBytes || actual.files.length !== inventory.files.length) {
+    throw new Error("Default extension bundle does not match its inventory");
+  }
+  for (let index = 0; index < actual.files.length; index += 1) {
+    const left = actual.files[index];
+    const right = inventory.files[index];
+    if (left.path !== right.path || left.size !== right.size || left.sha256 !== right.sha256) {
+      throw new Error("Default extension bundle does not match its inventory");
+    }
+  }
+}
+
+function readPackageMetadata(filename, description) {
+  const source = readRegularFile(filename, description, 256 * 1024);
+  try {
+    return JSON.parse(source);
+  } catch {
+    throw new Error(`${description} is invalid JSON`);
+  }
+}
+
+function verifyHostPi(serverRoot) {
+  const manifest = readPackageMetadata(path.join(serverRoot, "package.json"), "Server package manifest");
+  if (!isRecord(manifest.dependencies)) throw new Error("Server package dependencies are invalid");
+  for (const packageName of HOST_PI_PACKAGES) {
+    if (manifest.dependencies[packageName] !== HOST_PI_VERSION) {
+      throw new Error(`Server host must pin ${packageName}@${HOST_PI_VERSION}`);
+    }
+    const metadata = readPackageMetadata(
+      path.join(packagePath(serverRoot, packageName), "package.json"),
+      `Server host package ${packageName}`,
+    );
+    if (metadata.name !== packageName || metadata.version !== HOST_PI_VERSION) {
+      throw new Error(`Server host package identity is invalid: ${packageName}`);
+    }
+  }
+  return Object.fromEntries(HOST_PI_PACKAGES.map((name) => [name, HOST_PI_VERSION]));
+}
+
+function verifyDirectPackage(root, lock, extension, hostVersions) {
+  const packageRoot = packagePath(root, extension.name);
+  const metadata = readPackageMetadata(path.join(packageRoot, "package.json"), `Extension ${extension.name}`);
+  if (metadata.name !== extension.name || metadata.version !== extension.version) {
+    throw new Error(`Default extension package identity is invalid: ${extension.name}`);
+  }
+  const expectedPeers = EXPECTED_PI_PEERS[extension.name];
+  const actualPeers = Object.fromEntries(
+    Object.entries(isRecord(metadata.peerDependencies) ? metadata.peerDependencies : {})
+      .filter(([name]) => name.startsWith(PI_PACKAGE_PREFIX)),
+  );
+  if (!exactStringMap(actualPeers, expectedPeers)) {
+    throw new Error(`Default extension Pi peer contract changed: ${extension.name}`);
+  }
+  for (const [name, range] of Object.entries(expectedPeers)) {
+    if (!satisfiesSupportedRange(hostVersions[name], range)) {
+      throw new Error(`${extension.name} does not support host ${name}@${hostVersions[name]}`);
+    }
+  }
+  const layout = DEFAULT_EXTENSION_RESOURCE_LAYOUT[extension.name];
+  for (const resources of Object.values(layout)) {
+    for (const relative of resources) {
+      const resource = path.join(packageRoot, ...relative.split("/"));
+      const info = fs.lstatSync(resource, { throwIfNoEntry: false });
+      if (!info || info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) {
+        throw new Error(`Default extension resource is missing or unsafe: ${extension.name}/${relative}`);
+      }
+    }
+  }
+  const lockEntry = lock.packages[`node_modules/${extension.name}`];
+  if (!isRecord(lockEntry) || lockEntry.version !== extension.version) {
+    throw new Error(`Default extension is not pinned by the lock: ${extension.name}`);
+  }
+}
+
+function verifyPhysicalPackages(root, lock, files) {
+  const packageRoots = [];
+  for (const file of files) {
+    const lockKey = packageLockKeyFor(file.path);
+    if (lockKey === null) continue;
+    const metadata = readPackageMetadata(file.source, `Physical package metadata ${lockKey}`);
+    const lockEntry = lock.packages[lockKey];
+    const expectedName = packageNameFromLockKey(lockKey);
+    if (!isRecord(lockEntry)
+        || lockEntry.link === true
+        || metadata.name !== expectedName
+        || metadata.version !== lockEntry.version) {
+      throw new Error(`Physical extension package is not bound to its lock record: ${lockKey}`);
+    }
+    if (metadata.name.startsWith(PI_PACKAGE_PREFIX)) {
+      throw new Error(`Default extension bundle contains a nested Pi package: ${metadata.name}`);
+    }
+    if (lockEntry.hasInstallScript === true) {
+      if (ALLOWED_PHYSICAL_INSTALL_SCRIPTS.get(metadata.name) !== metadata.version) {
+        throw new Error(`Default extension bundle contains an unreviewed install script: ${metadata.name}`);
+      }
+    }
+    packageRoots.push({ lockKey, metadata, root: path.dirname(file.source) });
+  }
+  const installScripts = packageRoots
+    .filter(({ lockKey }) => lock.packages[lockKey].hasInstallScript === true)
+    .map(({ metadata }) => `${metadata.name}@${metadata.version}`)
+    .sort(comparePortable);
+  const expectedInstallScripts = [...ALLOWED_PHYSICAL_INSTALL_SCRIPTS]
+    .map(([name, version]) => `${name}@${version}`)
+    .sort(comparePortable);
+  if (JSON.stringify(installScripts) !== JSON.stringify(expectedInstallScripts)) {
+    throw new Error("Default extension install-script allowlist is incomplete or stale");
+  }
+  const bashWasm = path.join(packagePath(root, "tree-sitter-bash"), "tree-sitter-bash.wasm");
+  if (!fs.statSync(bashWasm, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error("tree-sitter-bash must ship its reviewed WASM runtime when scripts are disabled");
+  }
+  return packageRoots;
+}
+
+export function verifyDefaultExtensionSource({
+  sourceDirectory = DEFAULT_EXTENSION_SOURCE_DIRECTORY,
+  expectedVersion,
+} = {}) {
+  const manifest = readFormattedJson(path.join(sourceDirectory, "package.json"), "Default extension package manifest");
+  const lock = readFormattedJson(path.join(sourceDirectory, "package-lock.json"), "Default extension package lock");
+  const version = expectedVersion ?? manifest.version;
+  validateManifest(manifest, version);
+  const lockSummary = verifyCommittedLock(manifest, lock);
+  const lockSha256 = createHash("sha256")
+    .update(fs.readFileSync(path.join(sourceDirectory, "package-lock.json")))
+    .digest("hex");
+  if (lockSha256 !== DEFAULT_EXTENSION_LOCK_SHA256) {
+    throw new Error("Default extension lock graph changed without updating its audited digest");
+  }
+  return { lock, lockSha256, lockSummary, manifest, version };
+}
+
+export async function verifyDefaultExtensionBundle(root, {
+  expectedVersion,
+  serverRoot,
+  requireInventory = true,
+} = {}) {
+  if (!serverRoot) throw new Error("Server root is required to verify default extension peers");
+  const rootInfo = fs.lstatSync(root, { throwIfNoEntry: false });
+  if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) {
+    throw new Error("Default extension bundle root is invalid");
+  }
+  const { lock, lockSummary, manifest, version } = verifyDefaultExtensionSource({
+    sourceDirectory: root,
+    expectedVersion,
+  });
+  const hostVersions = verifyHostPi(serverRoot);
+  const tree = collectRegularFiles(root);
+  if (tree.files.some(({ path: relative }) => relative.includes(`node_modules/${PI_PACKAGE_PREFIX}`))) {
+    throw new Error("Default extension bundle contains a nested Pi package path");
+  }
+  const physicalPackages = verifyPhysicalPackages(root, lock, tree.files);
+  for (const extension of DEFAULT_EXTENSION_PACKAGES) {
+    verifyDirectPackage(root, lock, extension, hostVersions);
+  }
+  let inventory;
+  if (requireInventory) {
+    const inventorySource = readRegularFile(path.join(root, "inventory.json"), "Default extension inventory");
+    try {
+      inventory = JSON.parse(inventorySource);
+    } catch {
+      throw new Error("Default extension inventory is invalid JSON");
+    }
+    if (canonicalExtensionJson(inventory) !== inventorySource) {
+      throw new Error("Default extension inventory is not canonical");
+    }
+    await verifyInventory(root, inventory);
+  }
+  return {
+    inventory,
+    lock,
+    lockSummary,
+    manifest,
+    packages: physicalPackages,
+    version,
+  };
+}
+
+function repositoryUrl(metadata) {
+  const value = typeof metadata.repository === "string"
+    ? metadata.repository
+    : isRecord(metadata.repository)
+      ? metadata.repository.url
+      : undefined;
+  return typeof value === "string" ? value.replace(/^git\+/, "") : "not declared";
+}
+
+function licenseFiles(packageRoot) {
+  return fs.readdirSync(packageRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /^(?:licen[cs]e|copying|notice)(?:[._-].*)?$/i.test(entry.name))
+    .map((entry) => {
+      const filename = path.join(packageRoot, entry.name);
+      const info = fs.lstatSync(filename);
+      if (info.isSymbolicLink() || info.nlink !== 1 || info.size > MAX_LICENSE_BYTES) {
+        throw new Error(`Extension license file is unsafe: ${entry.name}`);
+      }
+      return { name: entry.name, text: fs.readFileSync(filename, "utf8").trimEnd() };
+    })
+    .sort((left, right) => comparePortable(left.name, right.name));
+}
+
+export function createDefaultExtensionNotices(verification) {
+  const packages = [...verification.packages]
+    .sort((left, right) => comparePortable(
+      `${left.metadata.name}@${left.metadata.version}:${left.lockKey}`,
+      `${right.metadata.name}@${right.metadata.version}:${right.lockKey}`,
+    ));
+  const lines = [
+    "PiHub Default Extensions - Third-Party Notices",
+    "",
+    "This file is generated from the physical packages in the signed platform artifact.",
+    "npm lifecycle scripts were not executed while producing this bundle.",
+    "",
+  ];
+  for (const entry of packages) {
+    const metadata = entry.metadata;
+    const declaredLicense = typeof metadata.license === "string" ? metadata.license : "not declared";
+    lines.push(
+      `==============================================================================`,
+      `${metadata.name}@${metadata.version}`,
+      `Installed path: extensions/${entry.lockKey}`,
+      `Declared license: ${declaredLicense}`,
+      `Repository: ${repositoryUrl(metadata)}`,
+    );
+    const notices = licenseFiles(entry.root);
+    if (notices.length === 0) {
+      lines.push("License text: not included in the published npm tarball; see the declared upstream repository.", "");
+      continue;
+    }
+    for (const notice of notices) {
+      lines.push("", `--- ${notice.name} ---`, notice.text, "");
+    }
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function runNpm(run, args, cwd) {
+  const prepared = prepareSecureNpmEnvironment("pihub-extension-npm-");
+  try {
+    if (run) return run(args, cwd, 128 * 1024 * 1024, { env: prepared.environment });
+    const command = process.platform === "win32" ? "npm.cmd" : "npm";
+    const result = spawnSync(command, args, {
+      cwd,
+      encoding: "utf8",
+      env: prepared.environment,
+      maxBuffer: 128 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (result.status !== 0) {
+      throw new Error((result.stderr || result.stdout || "npm failed").slice(0, 16_384));
+    }
+    return result.stdout;
+  } finally {
+    prepared.cleanup();
+  }
+}
+
+export function installDefaultExtensionDependencies(run, cwd) {
+  return runNpm(run, [
+    "ci",
+    "--ignore-scripts",
+    "--omit=peer",
+    "--engine-strict=true",
+    "--no-bin-links",
+    "--legacy-peer-deps=false",
+    "--force=false",
+    "--no-audit",
+    "--no-fund",
+    "--registry=https://registry.npmjs.org/",
+  ], cwd);
+}
+
+export function assertExtensionBuildToolchain(run) {
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  if (major !== 22 || minor < 19) {
+    throw new Error(`Default extensions require Node 22.19.x or newer Node 22; got ${process.version}`);
+  }
+  const npmVersion = runNpm(run, ["--version"], repositoryRoot).trim();
+  if (!/^10\.\d+\.\d+$/.test(npmVersion)) {
+    throw new Error(`Default extensions require npm 10.x; got ${npmVersion}`);
+  }
+  return { node: process.versions.node, npm: npmVersion };
+}
+
+export async function stageDefaultExtensionBundle({
+  destinationDirectory,
+  expectedVersion,
+  run,
+  serverRoot,
+  sourceDirectory = DEFAULT_EXTENSION_SOURCE_DIRECTORY,
+} = {}) {
+  if (!destinationDirectory || !serverRoot) throw new Error("Extension staging requires destination and Server roots");
+  const toolchain = assertExtensionBuildToolchain(run);
+  verifyDefaultExtensionSource({ sourceDirectory, expectedVersion });
+  fs.mkdirSync(destinationDirectory, { mode: 0o700 });
+  for (const name of ["package.json", "package-lock.json"]) {
+    fs.copyFileSync(path.join(sourceDirectory, name), path.join(destinationDirectory, name), fs.constants.COPYFILE_EXCL);
+  }
+  installDefaultExtensionDependencies(run, destinationDirectory);
+  const hiddenLock = path.join(destinationDirectory, "node_modules", ".package-lock.json");
+  if (fs.existsSync(hiddenLock)) fs.rmSync(hiddenLock);
+  const preInventory = await verifyDefaultExtensionBundle(destinationDirectory, {
+    expectedVersion,
+    requireInventory: false,
+    serverRoot,
+  });
+  const inventory = await createDefaultExtensionInventory(destinationDirectory);
+  fs.writeFileSync(
+    path.join(destinationDirectory, "inventory.json"),
+    canonicalExtensionJson(inventory),
+    { encoding: "utf8", flag: "wx", mode: 0o644 },
+  );
+  const verification = await verifyDefaultExtensionBundle(destinationDirectory, {
+    expectedVersion,
+    serverRoot,
+  });
+  const notices = createDefaultExtensionNotices(verification);
+  return {
+    ...verification,
+    inventorySha256: createHash("sha256").update(canonicalExtensionJson(inventory)).digest("hex"),
+    lockSha256: await sha256File(path.join(destinationDirectory, "package-lock.json")),
+    notices,
+    physicalPackages: preInventory.packages.length,
+    toolchain,
+  };
+}
+
+function main() {
+  const serverManifest = readFormattedJson(
+    path.join(repositoryRoot, "server", "package.json"),
+    "Server package manifest",
+  );
+  const verification = verifyDefaultExtensionSource({ expectedVersion: serverManifest.version });
+  console.log(
+    `Verified ${verification.manifest.name}@${verification.version} lock `
+    + `(${verification.lockSummary.externalEntries} registry records; `
+    + `${verification.lockSummary.omittedPeerIntegrityEntries} omitted Pi peer records)`,
+  );
+}
+
+const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
+if (import.meta.url === invokedPath) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Default extension verification failed");
+    process.exitCode = 1;
+  }
+}

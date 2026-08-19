@@ -1,0 +1,9 @@
+/.github/CODEOWNERS @yourChainGod
+/.github/workflows/ @yourChainGod
+/.gitleaks.toml @yourChainGod
+/scripts/privacy-scan.mjs @yourChainGod
+/scripts/privacy-scan.test.mjs @yourChainGod
+/scripts/release-workflow-security.test.mjs @yourChainGod
+/src-tauri/updater.pubkey @yourChainGod
+/server/lib/release-manifest.ts @yourChainGod
+/server/lib/server-release.ts @yourChainGod
