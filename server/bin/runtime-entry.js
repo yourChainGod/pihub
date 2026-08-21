@@ -38,7 +38,12 @@ async function runRuntimeEntry(argv = process.argv) {
   return "pi";
 }
 
-if (require.main === module) {
+// The standalone pi launcher (bin/pi-launcher.mjs, written at install time)
+// resolves the current release and *imports* this file. Under an ESM import
+// require.main is undefined, so the launcher marks itself through the
+// environment; without the marker this module must stay inert (the Next
+// supervisor also require()s it for INTERNAL_NEXT_SENTINEL).
+if (require.main === module || process.env.PIHUB_STANDALONE_LAUNCHER === "1") {
   runRuntimeEntry().catch((error) => {
     console.error(error instanceof Error ? error.message : "PiHub runtime entry failed");
     process.exitCode = 1;

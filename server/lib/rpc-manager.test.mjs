@@ -39,6 +39,16 @@ test("RPC session startup treats only sessions with messages as continuing", asy
   assert.doesNotMatch(startupSource, /sessionManager\.buildSessionContext\(\)/);
 });
 
+test("new sessions default to the strongest supported thinking level without persisting it", async () => {
+  const source = await readFile(new URL("./rpc-manager.ts", import.meta.url), "utf8");
+  const startupSource = source.slice(source.indexOf("export async function startRpcSession"));
+
+  assert.match(startupSource, /withMaxThinkingDefault\(selectInitialModelScope\(/);
+  const persistCall = startupSource.slice(startupSource.indexOf("persistExplicitStartupPreferences("));
+  assert.match(persistCall, /\.\.\.\(thinkingLevel \? \{ thinkingLevel \} : \{\}\)/);
+  assert.doesNotMatch(persistCall, /initial\.thinkingLevel/);
+});
+
 test("RPC session startup opens an existing session file only once and trusts its cwd", async () => {
   const source = await readFile(new URL("./rpc-manager.ts", import.meta.url), "utf8");
   const startupSource = source.slice(source.indexOf("export async function startRpcSession"));
@@ -148,6 +158,15 @@ test("custom extension UI receives the fixed headless terminal facade", async ()
 
   assert.match(customUiSource, /createHeadlessCustomUiTui\(/);
   assert.match(customUiSource, /width,/);
+});
+
+test("extensions are bound in tui mode so interactive flows (e.g. pi-ask) run", async () => {
+  const source = await readFile(new URL("./rpc-manager.ts", import.meta.url), "utf8");
+
+  assert.match(source, /mode\?: "rpc" \| "tui"/);
+  assert.match(source, /mode: "tui",/);
+  assert.doesNotMatch(source, /setUIContext\?\.\([^;]*"rpc"\)/);
+  assert.equal((source.match(/setUIContext\?\.\([^;]*"tui"\)/g) ?? []).length, 3);
 });
 
 test("reloading a session invalidates the models cache", async () => {

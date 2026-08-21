@@ -167,7 +167,7 @@ export function createVerifiedFileBodyStream(
     async cancel() {
       await close();
     },
-  }, { highWaterMark: 0 });
+  }, { highWaterMark: 2 });
 }
 
 export type DocxPreviewArchiveValidation =

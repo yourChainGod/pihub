@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 import { scanPaths, scanTextContent } from "./privacy-scan.mjs";
@@ -527,6 +528,67 @@ export async function scanServerStagingTree(stagingDirectory, options = {}) {
     },
   });
   return { ...result, inspection };
+}
+
+// Upstream win32 native binaries embed their CI build-machine paths (the
+// swc/node-pty/clipboard native modules have no linux counterpart in the
+// staged tree). Same audit contract as the extension bundle's
+// AUDITED_PRIVACY_FINDINGS: pinned by sha256, build paths only, no user data.
+const AUDITED_SERVER_STAGING_PRIVACY_FINDINGS = new Map([
+  [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-win32-x64-msvc/clipboard.win32-x64-msvc.node",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "2b75a71676a9054323a223c7853570fa44bf73a701d6c3160219ec0971052fd5",
+    }),
+  ],
+  [
+    "node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty.pdb",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "9275fecdca50f646579134e44604ba0ce81b184cea8edfc7c9fa53e59b475013",
+    }),
+  ],
+  [
+    "node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty_console_list.pdb",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "eedbd0fb50293fff4532465ac6e7d765c0d543923ae11e6b1a05b5ae55fe3476",
+    }),
+  ],
+  [
+    "node_modules/@next/swc-win32-x64-msvc/next-swc.win32-x64-msvc.node",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "1589d4ef2398a4076f34cd03bf59bc7c164e6b03b1badbca27e3dbf111208555",
+    }),
+  ],
+]);
+
+function auditedServerStagingFinding(relative, rule) {
+  if (relative.startsWith("extensions/")) return undefined;
+  const audited = AUDITED_SERVER_STAGING_PRIVACY_FINDINGS.get(relative);
+  return audited?.rules.has(rule) ? audited : undefined;
+}
+
+export function isAuditedServerStagingPrivacyFinding(stagingDirectory, finding) {
+  if (!finding || typeof finding.path !== "string" || typeof finding.rule !== "string") return false;
+  const relative = finding.path.replace(/^archive!/, "");
+  const audited = auditedServerStagingFinding(relative, finding.rule);
+  if (!audited) return false;
+  const filename = path.join(stagingDirectory, ...relative.split("/"));
+  const info = fs.lstatSync(filename, { throwIfNoEntry: false });
+  if (!info?.isFile() || info.isSymbolicLink() || info.nlink !== 1) return false;
+  return createHash("sha256").update(fs.readFileSync(filename)).digest("hex") === audited.sha256;
+}
+
+// Archive-level scans do not materialize every member on disk; the streamed
+// member hash takes the place of the on-disk re-hash.
+export function isAuditedServerStagingArchiveFinding(finding, streamedSha256) {
+  if (!finding || typeof finding.path !== "string" || typeof finding.rule !== "string") return false;
+  const relative = finding.path.replace(/^archive!/, "");
+  const audited = auditedServerStagingFinding(relative, finding.rule);
+  return Boolean(audited) && streamedSha256 === audited.sha256;
 }
 
 function forbiddenPathVariants(value) {

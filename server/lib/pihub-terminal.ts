@@ -6,8 +6,12 @@ import * as pty from "@lydell/node-pty";
 import { createMinimalProcessEnvironment } from "./process-environment";
 
 export const DEFAULT_TERMINAL_OUTPUT_LIMIT = 200_000;
+/** Coalescing window for PTY output bursts, in milliseconds. */
+export const DEFAULT_TERMINAL_OUTPUT_BATCH_MS = 16;
+/** A pending batch this large is emitted immediately instead of waiting. */
+export const DEFAULT_TERMINAL_OUTPUT_BATCH_MAX_BYTES = 64_000;
 export const DEFAULT_TERMINAL_IDLE_TTL_MS = 10 * 60 * 1000;
-export const DEFAULT_TERMINALS_PER_OWNER = 4;
+export const DEFAULT_TERMINALS_PER_OWNER = 8;
 export const DEFAULT_TERMINALS_PER_PROCESS = 32;
 export const DEFAULT_SUBSCRIBERS_PER_TERMINAL = 4;
 
@@ -80,6 +84,8 @@ export interface TerminalManagerOptions {
   readonly now?: () => number;
   readonly scheduler?: TerminalScheduler;
   readonly outputLimit?: number;
+  readonly outputBatchMs?: number;
+  readonly outputBatchMaxBytes?: number;
   readonly idleTtlMs?: number;
   readonly maxTerminalsPerOwner?: number;
   readonly maxTerminalsPerProcess?: number;
@@ -92,6 +98,8 @@ interface ManagedTerminal extends TerminalSession {
   idleTimer: TerminalTimerHandle | null;
   dataSubscription: { dispose(): void } | null;
   exitSubscription: { dispose(): void } | null;
+  batchBuffer: string;
+  batchTimer: TerminalTimerHandle | null;
 }
 
 interface TerminalRuntimeState {
@@ -369,6 +377,8 @@ export class TerminalManager {
   private readonly now: () => number;
   private readonly scheduler: TerminalScheduler;
   private readonly outputLimit: number;
+  private readonly outputBatchMs: number;
+  private readonly outputBatchMaxBytes: number;
   private readonly idleTtlMs: number;
   private readonly maxPerOwner: number;
   private readonly maxPerProcess: number;
@@ -387,6 +397,16 @@ export class TerminalManager {
     this.now = options.now ?? Date.now;
     this.scheduler = options.scheduler ?? defaultScheduler();
     this.outputLimit = positiveOption(options.outputLimit, DEFAULT_TERMINAL_OUTPUT_LIMIT, "outputLimit");
+    this.outputBatchMs = positiveOption(
+      options.outputBatchMs,
+      DEFAULT_TERMINAL_OUTPUT_BATCH_MS,
+      "outputBatchMs",
+    );
+    this.outputBatchMaxBytes = positiveOption(
+      options.outputBatchMaxBytes,
+      DEFAULT_TERMINAL_OUTPUT_BATCH_MAX_BYTES,
+      "outputBatchMaxBytes",
+    );
     this.idleTtlMs = positiveOption(options.idleTtlMs, DEFAULT_TERMINAL_IDLE_TTL_MS, "idleTtlMs");
     this.maxPerOwner = positiveOption(
       options.maxTerminalsPerOwner,
@@ -451,6 +471,8 @@ export class TerminalManager {
       idleTimer: null,
       dataSubscription: null,
       exitSubscription: null,
+      batchBuffer: "",
+      batchTimer: null,
     };
     session.events.setMaxListeners(32);
     session.dataSubscription = child.onData((data) => {
@@ -458,7 +480,7 @@ export class TerminalManager {
       output.append(data);
       session.output = output.output;
       session.dropped = output.dropped;
-      session.events.emit("event", { type: "output", data } satisfies TerminalEvent);
+      this.accumulateOutput(session, data);
     });
     session.exitSubscription = child.onExit(({ exitCode }) => {
       this.finalize(session, "exit", exitCode, false);
@@ -572,6 +594,48 @@ export class TerminalManager {
     this.armIdleTimer(session);
   }
 
+  /**
+   * Leading-edge throttle over PTY chunks: the first chunk of a quiet terminal is
+   * emitted immediately, and anything arriving inside the following window is
+   * coalesced into a single emit. Idle-then-keystroke echo therefore pays no added
+   * latency, while a sustained burst costs one emit per window no matter how many
+   * `onData` calls it is split across.
+   */
+  private accumulateOutput(session: ManagedTerminal, data: string): void {
+    if (!data) return;
+    if (session.batchTimer === null) {
+      session.events.emit("event", { type: "output", data } satisfies TerminalEvent);
+      this.armBatchTimer(session);
+      return;
+    }
+    session.batchBuffer += data;
+    // Bound the pending batch so a fast writer cannot grow it without limit.
+    if (session.batchBuffer.length >= this.outputBatchMaxBytes) this.flushOutput(session);
+  }
+
+  private armBatchTimer(session: ManagedTerminal): void {
+    session.batchTimer = this.scheduler.setTimeout(() => {
+      session.batchTimer = null;
+      // Re-arm only while output keeps flowing, so an idle terminal holds no timer.
+      if (session.batchBuffer && !session.closed) {
+        this.flushOutput(session);
+        this.armBatchTimer(session);
+      }
+    }, this.outputBatchMs);
+    session.batchTimer.unref?.();
+  }
+
+  private flushOutput(session: ManagedTerminal): void {
+    if (session.batchTimer !== null) {
+      this.scheduler.clearTimeout(session.batchTimer);
+      session.batchTimer = null;
+    }
+    const data = session.batchBuffer;
+    if (!data) return;
+    session.batchBuffer = "";
+    session.events.emit("event", { type: "output", data } satisfies TerminalEvent);
+  }
+
   private armIdleTimer(session: ManagedTerminal, delayMs = this.idleTtlMs): void {
     if (session.closed) return;
     if (session.idleTimer) this.scheduler.clearTimeout(session.idleTimer);
@@ -605,6 +669,7 @@ export class TerminalManager {
       this.scheduler.clearTimeout(session.idleTimer);
       session.idleTimer = null;
     }
+    this.flushOutput(session);
     session.dataSubscription?.dispose();
     session.exitSubscription?.dispose();
     session.dataSubscription = null;

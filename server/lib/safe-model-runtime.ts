@@ -64,6 +64,16 @@ const MODEL_MAX_IDLE_TIMEOUT_MS = 10 * 60_000;
 const MODEL_MAX_REQUEST_BYTES = 64 * 1024 * 1024;
 const MODEL_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 const HARDENED_RUNTIME = Symbol.for("pihub.safe-model-runtime.hardened");
+// @cortexkit/pi-magic-context latches its extension registration to once per
+// process (Symbol.for("magic-context.pi.active")), which matches the
+// single-session pi TUI. PiHub hosts many AgentSessions in one shared process
+// and the SDK re-invokes the extension factory for each of them, so without a
+// reset every session after the first silently skips full registration
+// ("in-process re-init detected"). Clear the latch before building per-session
+// services; the extension's process-wide resources (sqlite handle, config
+// migration) are internally singleton-guarded, while its handlers register
+// against the session-scoped extension API.
+const MAGIC_CONTEXT_PROCESS_LATCH = Symbol.for("magic-context.pi.active");
 export const UNSUPPORTED_MODEL_TRANSPORT_CODE = "unsupported_transport";
 export const UNSUPPORTED_MODEL_TRANSPORT_MESSAGE = "unsupported_transport: provider transport is unavailable";
 
@@ -445,9 +455,20 @@ export async function createSafeModelRuntime(
   return hardened;
 }
 
+export function resetExtensionProcessLatches(): void {
+  const globalScope = globalThis as Record<PropertyKey, unknown>;
+  if (!(MAGIC_CONTEXT_PROCESS_LATCH in globalScope)) return;
+  try {
+    delete globalScope[MAGIC_CONTEXT_PROCESS_LATCH];
+  } catch {
+    globalScope[MAGIC_CONTEXT_PROCESS_LATCH] = undefined;
+  }
+}
+
 export async function createSafeAgentSessionServices(
   options: CreateAgentSessionServicesOptions,
 ): Promise<AgentSessionServices> {
+  resetExtensionProcessLatches();
   if (options.modelRuntime) {
     return createAgentSessionServices({
       ...options,

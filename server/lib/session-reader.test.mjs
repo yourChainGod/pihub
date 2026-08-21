@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,11 +14,13 @@ const {
   cacheSessionPath,
   invalidateSessionListCache,
   invalidateSessionPathCache,
+  openSessionManagerCached,
   readSessionHeader,
   resolveSessionIdByPath,
   resolveSessionPath,
+  scanSessionFileRecords,
+  sessionFileScannerRef,
 } = await jiti.import("./session-reader.ts");
-const { SessionManager } = await jiti.import("@earendil-works/pi-coding-agent");
 
 function resetSessionListState() {
   globalThis.__piSessionListCache = undefined;
@@ -362,14 +364,14 @@ test("keeps forward and reverse session path caches in sync", async (t) => {
 });
 
 test("evicts removed and same-path replaced session cache entries", async (t) => {
-  const originalListAll = SessionManager.listAll;
+  const originalScan = sessionFileScannerRef.scan;
   const dir = mkdtempSync(join(tmpdir(), "pi-web-stale-cache-test-"));
   const filePath = join(dir, "session.jsonl");
   const oldSessionId = "stale-cache-session";
-  SessionManager.listAll = async () => [];
+  sessionFileScannerRef.scan = async () => [];
   resetSessionListState();
   t.after(() => {
-    SessionManager.listAll = originalListAll;
+    sessionFileScannerRef.scan = originalScan;
     invalidateSessionPathCache(oldSessionId);
     resetSessionListState();
     rmSync(dir, { recursive: true, force: true });
@@ -398,16 +400,59 @@ test("evicts removed and same-path replaced session cache entries", async (t) =>
   assert.equal(globalThis.__piPathToSessionIdCache?.has(sessionPathKey(filePath)), false);
 });
 
+test("bounds the session path index and evicts both directions together", (t) => {
+  const previousForward = globalThis.__piSessionPathCache;
+  const previousReverse = globalThis.__piPathToSessionIdCache;
+  globalThis.__piSessionPathCache = undefined;
+  globalThis.__piPathToSessionIdCache = undefined;
+  t.after(() => {
+    globalThis.__piSessionPathCache = previousForward;
+    globalThis.__piPathToSessionIdCache = previousReverse;
+  });
+
+  const pathOf = (index) => join(tmpdir(), "pi-web-bounded-cache", `session-${index}.jsonl`);
+  const total = 2500;
+  for (let index = 0; index < total; index += 1) cacheSessionPath(`session-${index}`, pathOf(index));
+
+  const forward = globalThis.__piSessionPathCache;
+  const reverse = globalThis.__piPathToSessionIdCache;
+  assert.equal(forward.size, 1000);
+  assert.equal(reverse.size, 1000);
+
+  // Oldest insert is gone from both maps; newest survives in both.
+  assert.equal(forward.has("session-0"), false);
+  assert.equal(reverse.has(sessionPathKey(pathOf(0))), false);
+  assert.equal(forward.get(`session-${total - 1}`), pathOf(total - 1));
+  assert.equal(reverse.get(sessionPathKey(pathOf(total - 1))), `session-${total - 1}`);
+
+  // No orphan on either side: every row round-trips through the other map.
+  for (const [sessionId, filePath] of forward) {
+    assert.equal(reverse.get(sessionPathKey(filePath)), sessionId);
+  }
+  for (const [pathKey, sessionId] of reverse) {
+    assert.equal(sessionPathKey(forward.get(sessionId)), pathKey);
+  }
+
+  // Re-caching a live session refreshes its recency instead of letting the
+  // next 400 inserts evict it.
+  cacheSessionPath("session-1600", pathOf(1600));
+  for (let index = total; index < total + 400; index += 1) cacheSessionPath(`session-${index}`, pathOf(index));
+  assert.equal(forward.get("session-1600"), pathOf(1600));
+  assert.equal(reverse.get(sessionPathKey(pathOf(1600))), "session-1600");
+  assert.equal(forward.size, 1000);
+  assert.equal(reverse.size, 1000);
+});
+
 test("forced session listing bypasses the fresh server cache", async (t) => {
-  const originalListAll = SessionManager.listAll;
+  const originalScan = sessionFileScannerRef.scan;
   let scans = 0;
-  SessionManager.listAll = async () => {
+  sessionFileScannerRef.scan = async () => {
     scans += 1;
     return [];
   };
   resetSessionListState();
   t.after(() => {
-    SessionManager.listAll = originalListAll;
+    sessionFileScannerRef.scan = originalScan;
     resetSessionListState();
   });
 
@@ -420,7 +465,7 @@ test("forced session listing bypasses the fresh server cache", async (t) => {
 });
 
 test("a scan invalidated in flight retries before returning to its caller", async (t) => {
-  const originalListAll = SessionManager.listAll;
+  const originalScan = sessionFileScannerRef.scan;
   let scans = 0;
   let releaseFirstScan;
   let markFirstScanStarted;
@@ -430,7 +475,7 @@ test("a scan invalidated in flight retries before returning to its caller", asyn
   const firstScanGate = new Promise((resolve) => {
     releaseFirstScan = resolve;
   });
-  SessionManager.listAll = async () => {
+  sessionFileScannerRef.scan = async () => {
     scans += 1;
     if (scans === 1) {
       markFirstScanStarted();
@@ -440,7 +485,7 @@ test("a scan invalidated in flight retries before returning to its caller", asyn
   };
   resetSessionListState();
   t.after(() => {
-    SessionManager.listAll = originalListAll;
+    sessionFileScannerRef.scan = originalScan;
     resetSessionListState();
   });
 
@@ -482,4 +527,54 @@ test("disk sessions replace runtime snapshots with the same id", () => {
   assert.deepEqual(merged.map((session) => session.id), ["runtime-only", "same-id"]);
   assert.equal(merged[1], persisted);
   assert.equal(merged[1].transient, undefined);
+});
+
+test("session file records cache by size+mtime and reparse after append", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-web-scan-cache-"));
+  const sessionsDir = join(dir, "sessions");
+  const projectDir = join(sessionsDir, "--tmp-project--");
+  mkdirSync(projectDir, { recursive: true });
+  const filePath = join(projectDir, "2026-01-01T00-00-00-000Z_test-session.jsonl");
+  const header = (id) => JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: dir });
+  writeFileSync(filePath, `${header("scan-cache-session")}\n${JSON.stringify(userEntry("u1", null, "第一条消息"))}\n`);
+  // Pin a whole-second mtime so the tamper below can reproduce the exact key
+  // (utimesSync truncates to milliseconds, statSync reads nanosecond floats).
+  const pinned = new Date("2026-01-01T00:00:00.000Z");
+  utimesSync(filePath, pinned, pinned);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const first = await scanSessionFileRecords(sessionsDir);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].id, "scan-cache-session");
+  assert.equal(first[0].messageCount, 1);
+  assert.equal(first[0].firstMessage, "第一条消息");
+
+  // Cache hit: same size+mtime returns the memoized record even if the bytes
+  // changed under it (append-only files never do this in practice).
+  const tampered = `${header("scan-cache-session")}\n${JSON.stringify(userEntry("u1", null, "第二三四五"))}\n`;
+  writeFileSync(filePath, tampered);
+  utimesSync(filePath, pinned, pinned);
+  const cached = await scanSessionFileRecords(sessionsDir);
+  assert.equal(cached[0].firstMessage, "第一条消息");
+
+  // Append invalidates via size change and picks up the new entry.
+  appendFileSync(filePath, `${JSON.stringify(userEntry("u2", "u1", "追加"))}\n`);
+  const reparsed = await scanSessionFileRecords(sessionsDir);
+  assert.equal(reparsed[0].messageCount, 2);
+});
+
+test("openSessionManagerCached reuses stable files and reloads appended ones", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-web-manager-cache-"));
+  const filePath = join(dir, "session.jsonl");
+  writeFileSync(filePath, `${JSON.stringify({ type: "session", version: 3, id: "manager-cache", timestamp: "2026-01-01T00:00:00.000Z", cwd: dir })}\n${JSON.stringify(userEntry("u1", null, "one"))}\n`);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const first = openSessionManagerCached(filePath);
+  assert.equal(openSessionManagerCached(filePath), first);
+  assert.equal(first.getEntries().length, 1);
+
+  appendFileSync(filePath, `${JSON.stringify(userEntry("u2", "u1", "two"))}\n`);
+  const reloaded = openSessionManagerCached(filePath);
+  assert.notEqual(reloaded, first);
+  assert.equal(reloaded.getEntries().length, 2);
 });

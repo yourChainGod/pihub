@@ -10,7 +10,7 @@ async function loadSubject() {
   }
 }
 
-const { resolveVisibleModels, selectInitialModelScope } = await loadSubject();
+const { resolveVisibleModels, selectInitialModelScope, maxThinkingLevel, withMaxThinkingDefault } = await loadSubject();
 
 const MODELS = [
   { id: "claude-opus-5", provider: "anthropic", name: "Claude Opus 5" },
@@ -190,4 +190,45 @@ test("rejects an explicit model outside the enabled scope", async () => {
     }),
     /not available in the enabled scope/,
   );
+});
+
+test("maxThinkingLevel picks the strongest supported level and skips non-reasoning models", () => {
+  const reasoning = { id: "r1", provider: "acme", reasoning: true };
+  const mapped = {
+    id: "r2",
+    provider: "acme",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+  };
+  const capped = {
+    id: "r3",
+    provider: "acme",
+    reasoning: true,
+    thinkingLevelMap: { high: null },
+  };
+  const plain = { id: "p1", provider: "acme", reasoning: false };
+
+  assert.equal(maxThinkingLevel(reasoning), "high");
+  assert.equal(maxThinkingLevel(mapped), "max");
+  assert.equal(maxThinkingLevel(capped), "medium");
+  assert.equal(maxThinkingLevel(plain), undefined);
+});
+
+test("withMaxThinkingDefault fills only unset levels on sessions with a model", () => {
+  const reasoning = { id: "r1", provider: "acme", reasoning: true };
+  const plain = { id: "p1", provider: "acme", reasoning: false };
+
+  assert.equal(
+    withMaxThinkingDefault({ model: reasoning, scopedModels: [] }).thinkingLevel,
+    "high",
+  );
+  assert.equal(
+    withMaxThinkingDefault({ model: reasoning, thinkingLevel: "low", scopedModels: [] }).thinkingLevel,
+    "low",
+  );
+  assert.equal(
+    withMaxThinkingDefault({ model: plain, scopedModels: [] }).thinkingLevel,
+    undefined,
+  );
+  assert.equal(withMaxThinkingDefault({ scopedModels: [] }).thinkingLevel, undefined);
 });

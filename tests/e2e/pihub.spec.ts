@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
-import { desktopCalls, desktopListenerCount, desktopSnapshot, emitDesktopEvent, installDesktopMock, legacySessionCacheExists, seedLegacySessionCache, setDesktopNetwork } from "./desktopMock";
+import { desktopCalls, desktopListenerCount, desktopSnapshot, emitDesktopEvent, installDesktopMock, legacySessionCacheExists, seedLegacySessionCache, setDesktopNetwork, setDesktopRunningSessions } from "./desktopMock";
 
 const screenshotDir = join(process.cwd(), "test-results", "screenshots");
 const pairingCode = `pihub-${"A".repeat(43)}`;
@@ -36,6 +36,18 @@ test.describe("设备中心", () => {
     await expect(studio.getByText("在线", { exact: true })).toBeVisible();
     await expect(linux.getByText("离线", { exact: true })).toBeVisible();
     await expect(windows.getByText("待配对", { exact: true })).toBeVisible();
+
+    // 单设备刷新只探测该设备，其它设备的已知状态保持不变
+    const probes = async (url: string) => (await desktopCalls(page))
+      .filter((call) => call.command === "probe_device" && call.args?.url === url).length;
+    const studioBefore = await probes("https://studio.tailnet.ts.net:30141");
+    const linuxBefore = await probes("https://build.tailnet.ts.net:30141");
+    await studio.getByRole("button", { name: "刷新 Studio Mac 状态" }).click();
+    await expect.poll(async () => probes("https://studio.tailnet.ts.net:30141")).toBe(studioBefore + 1);
+    await expect(studio.getByText("在线", { exact: true })).toBeVisible();
+    await expect(linux.getByText("离线", { exact: true })).toBeVisible();
+    await expect(windows.getByText("待配对", { exact: true })).toBeVisible();
+    expect(await probes("https://build.tailnet.ts.net:30141")).toBe(linuxBefore);
   });
 
   test("默认扩展只读展示为签名 Server 管理", async ({ page }, testInfo) => {
@@ -43,12 +55,13 @@ test.describe("设备中心", () => {
     await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
     await page.getByRole("button", { name: "设备设置" }).click();
     const dialog = page.getByRole("dialog", { name: "Studio Mac 设备中心" });
-    const extensions = dialog.locator(".setup-row-readonly");
+    const extensions = dialog.locator(".setup-row-readonly").filter({ hasText: "可选插件" });
 
-    await expect(extensions).toContainText("默认扩展 5/5");
-    await expect(extensions).toContainText("由签名 Server 版本管理");
+    await expect(extensions).toContainText("可选插件 7/7");
+    await expect(extensions).toContainText("仅来自签名 Server bundle");
     await expect(extensions.getByRole("button")).toHaveCount(0);
-    await expect(dialog).not.toContainText("Magic Context");
+    await expect(dialog).toContainText("Magic Context");
+    await expect(dialog).toContainText("todowrite 已禁用");
 
     await page.setViewportSize({ width: 720, height: 620 });
     const bounds = await dialog.evaluate((element) => {
@@ -179,7 +192,7 @@ test.describe("设备中心", () => {
     expect(results.violations).toEqual([]);
   });
 
-  test("Linux SSH 安装要求显式普通用户名", async ({ page }) => {
+  test("Linux SSH 安装可指定用户名，root 需显式二次确认", async ({ page }) => {
     await page.getByRole("button", { name: "SSH 一键安装" }).click();
     const dialog = page.getByRole("dialog", { name: "SSH 一键安装" });
     const linux = dialog.locator(".peer").filter({ hasText: "Build Linux" });
@@ -197,6 +210,84 @@ test.describe("设备中心", () => {
       username: "pi",
       installDefaultExtensions: true,
     });
+
+    // root 允许安装，但必须经过危险确认，且确认前不会发起任何 bootstrap
+    await expect(linux.getByRole("button", { name: "Tailscale SSH 配置" })).toBeEnabled();
+    await linux.getByRole("button", { name: "Tailscale SSH 配置" }).click();
+    await username.fill("root");
+    await dialog.getByRole("button", { name: "继续" }).click();
+    const confirm = page.getByRole("alertdialog", { name: /确认以 root 安装/ });
+    await expect(confirm).toBeVisible();
+    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(1);
+    await confirm.getByRole("button", { name: "取消" }).click();
+    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(1);
+
+    await expect(linux.getByRole("button", { name: "Tailscale SSH 配置" })).toBeEnabled();
+    await linux.getByRole("button", { name: "Tailscale SSH 配置" }).click();
+    await username.fill("root");
+    await dialog.getByRole("button", { name: "继续" }).click();
+    await page.getByRole("alertdialog", { name: /确认以 root 安装/ }).getByRole("button", { name: "以 root 安装" }).click();
+    await expect.poll(async () => (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer").length).toBe(2);
+    const [, rootBootstrap] = (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer");
+    expect(rootBootstrap.args).toMatchObject({ host: "build.tailnet.ts.net", os: "linux", username: "root" });
+  });
+
+  test("配置本地发布包目录后安装自动配对，配对码不进入界面", async ({ page }) => {
+    await page.getByRole("button", { name: "设置" }).click();
+    const settings = page.getByRole("dialog", { name: "连接设置" });
+    await settings.getByLabel("本地发布包目录").fill("/tmp/pihub-release");
+    await settings.getByRole("button", { name: "关闭" }).click();
+
+    await page.getByRole("button", { name: "SSH 一键安装" }).click();
+    const dialog = page.getByRole("dialog", { name: "SSH 一键安装" });
+    const linux = dialog.locator(".peer").filter({ hasText: "Build Linux" });
+    await linux.getByRole("button", { name: "Tailscale SSH 配置" }).click();
+    await dialog.getByPlaceholder("Linux 用户名（例如 pi 或 ubuntu）").fill("pi");
+    await dialog.getByRole("button", { name: "继续" }).click();
+
+    await expect(dialog.getByText(/已自动配对/)).toBeVisible();
+    const log = dialog.locator(".bootstrap-log");
+    await expect(log).toContainText("安装完成");
+    await expect(log).not.toContainText("PIHUB_PAIRING_CODE");
+    await expect(page.locator("body")).not.toContainText(`pihub-${"A".repeat(43)}`);
+
+    const bootstrapCalls = (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer");
+    expect(bootstrapCalls).toHaveLength(1);
+    expect(bootstrapCalls[0].args).toMatchObject({ localArchiveDir: "/tmp/pihub-release", autoPair: true });
+    const pairCalls = (await desktopCalls(page)).filter((call) => call.command === "pair_device");
+    expect(pairCalls).toHaveLength(1);
+    expect(pairCalls[0].args?.code).toBe(`pihub-${"A".repeat(43)}`);
+  });
+
+  test("远程安装可只勾选 Todo Rail 或仅安装 Server", async ({ page }) => {    await page.getByRole("button", { name: "SSH 一键安装" }).click();
+    const dialog = page.getByRole("dialog", { name: "SSH 一键安装" });
+    const todo = dialog.locator(".extension-checkbox").filter({ hasText: "Todo Rail" }).locator("input");
+    await expect(todo).toBeChecked();
+    for (const checkbox of await dialog.locator(".extension-checkbox input").all()) {
+      // Keep only Todo Rail selected for the first bootstrap request.
+      if (await checkbox.isChecked() && await checkbox.evaluate((input) => !(input.parentElement?.textContent ?? "").includes("Todo Rail"))) {
+        await checkbox.uncheck();
+      }
+    }
+    const studio = dialog.locator(".peer").filter({ hasText: "Studio Mac" });
+    await studio.getByRole("button", { name: "Tailscale SSH 配置" }).click();
+    await expect.poll(async () => (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer").length).toBe(1);
+    let bootstrapCalls = (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer");
+    expect(bootstrapCalls[0].args).toMatchObject({
+      host: "studio.tailnet.ts.net",
+      os: "macos",
+      installDefaultExtensions: true,
+      selectedExtensions: ["pi-todo-rail"],
+    });
+
+    await dialog.getByLabel("仅安装 Server").check();
+    await studio.getByRole("button", { name: "Tailscale SSH 配置" }).click();
+    await expect.poll(async () => (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer").length).toBe(2);
+    bootstrapCalls = (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer");
+    expect(bootstrapCalls[1].args).toMatchObject({
+      installDefaultExtensions: false,
+      selectedExtensions: [],
+    });
   });
 
   test("桌面布局通过 axe 并生成基线截图", async ({ page }, testInfo) => {
@@ -206,7 +297,7 @@ test.describe("设备中心", () => {
     const heading = hero.getByRole("heading", { name: "设备工作台" });
     const description = hero.locator("p");
 
-    await expect(heading).toHaveCSS("font-size", "34px");
+    await expect(heading).toHaveCSS("font-size", "24px");
     const desktopLayout = await page.locator(".app-shell").evaluate(() => {
       const heroBox = document.querySelector<HTMLElement>(".hero")?.getBoundingClientRect();
       const fleetBox = document.querySelector<HTMLElement>(".fleet-section")?.getBoundingClientRect();
@@ -259,93 +350,38 @@ test.describe("设备中心", () => {
   });
 });
 
-test.describe("桌面应用签名更新", () => {
-  async function openUpdates(page: Parameters<typeof installDesktopMock>[0]) {
-    await page.goto("/?workspace=alpha");
-    await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
-    await page.getByRole("button", { name: "设备设置" }).click();
-    const dialog = page.getByRole("dialog", { name: "Studio Mac 设备中心" });
-    await dialog.getByRole("button", { name: "版本更新" }).click();
-    await expect(dialog.locator(".setup-row").filter({ hasText: "PiHub Desktop" })).toBeVisible();
-    return dialog;
-  }
+async function openUpdatesPanel(page: Parameters<typeof installDesktopMock>[0]) {
+  await page.goto("/?workspace=alpha");
+  await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
+  await page.getByRole("button", { name: "设备设置" }).click();
+  const dialog = page.getByRole("dialog", { name: "Studio Mac 设备中心" });
+  await dialog.getByRole("button", { name: "版本更新" }).click();
+  await expect(dialog.locator(".setup-row").filter({ hasText: "PiHub Desktop" })).toBeVisible();
+  return dialog;
+}
 
-  test("仅通过无参数 Rust 命令完成检查、安装和重启", async ({ page }) => {
+async function seedLocalReleaseDir(page: Parameters<typeof installDesktopMock>[0], directory: string) {
+  await page.addInitScript((value) => localStorage.setItem("pihub-local-release-dir", value), directory);
+}
+
+test.describe("桌面版本展示", () => {
+  test("桌面行只读展示当前版本，不再触发检查、下载或重启命令", async ({ page }) => {
     await page.setViewportSize({ width: 1180, height: 800 });
-    await installDesktopMock(page, { desktopUpdateScenario: "available" });
-    const dialog = await openUpdates(page);
+    await installDesktopMock(page);
+    const dialog = await openUpdatesPanel(page);
     const desktop = dialog.locator(".setup-row").filter({ hasText: "PiHub Desktop" });
 
-    await desktop.getByRole("button", { name: "检查桌面更新" }).click();
-    await expect(desktop).toContainText("可更新至 v0.0.2");
-    await desktop.getByRole("button", { name: "下载并安装" }).click();
-    await expect(dialog.getByRole("progressbar", { name: "桌面更新下载进度" })).toBeVisible();
-    await expect(dialog.getByText("桌面更新已就绪", { exact: true })).toBeVisible();
-    await expect(desktop.getByRole("button", { name: "重启 PiHub" })).toBeVisible();
+    await expect(desktop).toContainText("当前 v0.0.1 · 自用本地构建，更新请在构建机重新出包安装");
+    await expect(desktop.getByRole("button")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "检查桌面更新" })).toHaveCount(0);
 
     const updaterCalls = (await desktopCalls(page)).filter((call) => call.command.startsWith("desktop_update_"));
     expect(updaterCalls.filter((call) => call.command === "desktop_update_status").length).toBeGreaterThanOrEqual(1);
-    expect(updaterCalls.filter((call) => call.command === "desktop_update_check")).toHaveLength(1);
-    expect(updaterCalls.filter((call) => call.command === "desktop_update_install")).toHaveLength(1);
-    expect(updaterCalls.filter((call) => call.command === "desktop_update_restart")).toHaveLength(0);
-    expect(updaterCalls.every((call) => Object.keys(call.args ?? {}).length === 0)).toBe(true);
+    expect(updaterCalls.filter((call) => call.command !== "desktop_update_status")).toHaveLength(0);
     expect((await desktopCalls(page)).some((call) => call.command.startsWith("plugin:updater") || call.command.startsWith("plugin:process"))).toBe(false);
 
     const results = await new AxeBuilder({ page }).include(".device-setup").analyze();
     expect(results.violations).toEqual([]);
-    await desktop.getByRole("button", { name: "重启 PiHub" }).click();
-    await expect(desktop).toContainText("正在重启 PiHub Desktop");
-    await expect.poll(async () => (await desktopCalls(page)).filter((call) => call.command === "desktop_update_restart").length).toBe(1);
-  });
-
-  test("最新版本仍保留重新检查入口", async ({ page }) => {
-    await page.setViewportSize({ width: 1180, height: 800 });
-    await installDesktopMock(page, { desktopUpdateScenario: "none" });
-    const dialog = await openUpdates(page);
-    const desktop = dialog.locator(".setup-row").filter({ hasText: "PiHub Desktop" });
-    await desktop.getByRole("button", { name: "检查桌面更新" }).click();
-    await expect(desktop).toContainText("已是最新版本");
-    await expect(desktop.getByRole("button", { name: "检查桌面更新" })).toBeEnabled();
-  });
-
-  test("签名失败时保留当前版本且不会开放重启", async ({ page }) => {
-    await page.setViewportSize({ width: 1180, height: 800 });
-    await installDesktopMock(page, { desktopUpdateScenario: "signature-failure" });
-    const dialog = await openUpdates(page);
-    const desktop = dialog.locator(".setup-row").filter({ hasText: "PiHub Desktop" });
-    await desktop.getByRole("button", { name: "检查桌面更新" }).click();
-    await desktop.getByRole("button", { name: "下载并安装" }).click();
-    await expect(dialog.getByRole("alert")).toContainText("更新包签名校验失败，安装已中止");
-    await expect(desktop.getByRole("button", { name: "重试安装" })).toBeVisible();
-    await expect(desktop.getByRole("button", { name: "重启 PiHub" })).toHaveCount(0);
-    expect((await desktopCalls(page)).filter((call) => call.command === "desktop_update_restart")).toHaveLength(0);
-  });
-
-  test("取消下载后不会安装或重启，并可重新尝试", async ({ page }) => {
-    await page.setViewportSize({ width: 1180, height: 800 });
-    await installDesktopMock(page, { desktopUpdateScenario: "available" });
-    const dialog = await openUpdates(page);
-    const desktop = dialog.locator(".setup-row").filter({ hasText: "PiHub Desktop" });
-
-    await desktop.getByRole("button", { name: "检查桌面更新" }).click();
-    await desktop.getByRole("button", { name: "下载并安装" }).click();
-    await expect(dialog.getByRole("button", { name: "取消下载" })).toBeVisible();
-    await dialog.getByRole("button", { name: "取消下载" }).click();
-    await expect(dialog.getByRole("alert")).toContainText("更新下载已取消，可重新尝试");
-    await expect(desktop.getByRole("button", { name: "重试安装" })).toBeEnabled();
-    await page.waitForTimeout(180);
-    await expect(dialog.getByText("桌面更新已就绪", { exact: true })).toHaveCount(0);
-    await expect(desktop.getByRole("button", { name: "重启 PiHub" })).toHaveCount(0);
-
-    let updaterCalls = (await desktopCalls(page)).filter((call) => call.command.startsWith("desktop_update_"));
-    expect(updaterCalls.filter((call) => call.command === "desktop_update_cancel")).toHaveLength(1);
-    expect(updaterCalls.filter((call) => call.command === "desktop_update_restart")).toHaveLength(0);
-    await desktop.getByRole("button", { name: "重试安装" }).click();
-    await expect(dialog.getByText("桌面更新已就绪", { exact: true })).toBeVisible();
-    updaterCalls = (await desktopCalls(page)).filter((call) => call.command.startsWith("desktop_update_"));
-    expect(updaterCalls.filter((call) => call.command === "desktop_update_install")).toHaveLength(2);
-    expect(updaterCalls.filter((call) => call.command === "desktop_update_restart")).toHaveLength(0);
-    expect(updaterCalls.every((call) => Object.keys(call.args ?? {}).length === 0)).toBe(true);
   });
 });
 
@@ -471,6 +507,250 @@ test.describe("桌面工作台", () => {
     await expect.poll(async () => (await desktopCalls(page)).filter((call) => call.command === "stop_agent_stream" && call.args?.sessionId === "session-1").length).toBeGreaterThanOrEqual(1);
   });
 
+  test("远端 Todo 部件随 setWidget 事件出现、更新并清除", async ({ page }) => {
+    await expect.poll(() => desktopListenerCount(page, "pihub-agent-event")).toBe(1);
+    const envelope = (event: Record<string, unknown>) => ({
+      deviceId: "alpha",
+      deviceOrigin: "https://studio.tailnet.ts.net:30141",
+      sessionId: "session-1",
+      generation: 1,
+      event,
+    });
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({ type: "extension_ui_request", id: "w1", method: "setWidget", widgetKey: "todo-rail", widgetLines: ["□ 修复发布清单", "\u001b[32m✓\u001b[0m 插件选择"], widgetPlacement: "aboveEditor" }));
+    const widget = page.locator(".extension-widget");
+    await expect(widget).toBeVisible();
+    await expect(widget).toContainText("□ 修复发布清单");
+    // ANSI 转义序列被剥离，不留控制字符
+    await expect(widget).toContainText("✓ 插件选择");
+
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({ type: "extension_ui_request", id: "w2", method: "setWidget", widgetKey: "todo-rail", widgetLines: ["✓ 全部完成"] }));
+    await expect(widget).toContainText("✓ 全部完成");
+    await expect(widget).not.toContainText("修复发布清单");
+
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({ type: "extension_ui_request", id: "w3", method: "setWidget", widgetKey: "todo-rail" }));
+    await expect(page.locator(".extension-widget")).toHaveCount(0);
+  });
+
+  test("扩展 custom UI 渲染按键驱动并在关闭后消失", async ({ page }) => {
+    await expect.poll(() => desktopListenerCount(page, "pihub-agent-event")).toBe(1);
+    const envelope = (event: Record<string, unknown>) => ({
+      deviceId: "alpha",
+      deviceOrigin: "https://studio.tailnet.ts.net:30141",
+      sessionId: "session-1",
+      generation: 1,
+      event,
+    });
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({ type: "extension_ui_request", id: "ask-1", method: "custom", lines: ["问题：选择环境", "› 开发", "  生产"] }));
+    const card = page.locator(".custom-ui-card");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("问题：选择环境");
+    await expect(card).toContainText("› 开发");
+    await expect(card).toContainText("生产");
+    // 卡片自动获得键盘焦点，方向键/回车直接发给扩展
+    const body = card.locator(".custom-ui-card-body");
+    await expect(body).toBeFocused();
+    await body.press("ArrowDown");
+    await body.press("Enter");
+    const uiInputs = async () => (await desktopCalls(page))
+      .filter((call) => call.command === "agegr_request" && call.args?.path === "/api/agent/session-1" && (call.args?.body as { type?: string } | undefined)?.type === "extension_ui_input")
+      .map((call) => { const body = call.args?.body as { id?: string; data?: string }; return { id: body.id, data: body.data }; });
+    await expect.poll(async () => (await uiInputs()).length).toBe(2);
+    expect(await uiInputs()).toEqual([
+      { id: "ask-1", data: "\u001b[B" },
+      { id: "ask-1", data: "\r" },
+    ]);
+
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({ type: "extension_ui_request", id: "ask-1", method: "custom", lines: [], closed: true }));
+    await expect(card).toHaveCount(0);
+  });
+
+  test("扩展 custom UI 的 (x) 选项渲染为可点击按钮", async ({ page }) => {
+    await expect.poll(() => desktopListenerCount(page, "pihub-agent-event")).toBe(1);
+    const envelope = (event: Record<string, unknown>) => ({
+      deviceId: "alpha",
+      deviceOrigin: "https://studio.tailnet.ts.net:30141",
+      sessionId: "session-1",
+      generation: 1,
+      event,
+    });
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({
+      type: "extension_ui_request",
+      id: "ask-2",
+      method: "custom",
+      lines: ["允许执行该命令？", "(y) Yes", "▸ (n) No", "↑/↓ move · enter confirm · esc deny"],
+    }));
+    const card = page.locator(".custom-ui-card");
+    await expect(card).toBeVisible();
+    const options = card.locator(".custom-ui-option");
+    await expect(options).toHaveCount(2);
+    // 选中标记行高亮；键位提示行不再重复出现
+    await expect(options.nth(1)).toHaveClass(/selected/);
+    await expect(card).not.toContainText("↑/↓ move");
+    // 点击选项发送对应字母键
+    await options.nth(1).click();
+    await expect.poll(async () => (await desktopCalls(page))
+      .filter((call) => (call.args?.body as { type?: string } | undefined)?.type === "extension_ui_input")
+      .map((call) => (call.args?.body as { data?: string }).data)).toEqual(["n"]);
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({ type: "extension_ui_request", id: "ask-2", method: "custom", lines: [], closed: true }));
+    await expect(card).toHaveCount(0);
+  });
+
+  test("扩展 custom UI 解析 pi-ask 编号选项帧（标签栏/描述/页脚）", async ({ page }) => {
+    await expect.poll(() => desktopListenerCount(page, "pihub-agent-event")).toBe(1);
+    const envelope = (event: Record<string, unknown>) => ({
+      deviceId: "alpha",
+      deviceOrigin: "https://studio.tailnet.ts.net:30141",
+      sessionId: "session-1",
+      generation: 1,
+      event,
+    });
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({
+      type: "extension_ui_request",
+      id: "ask-3",
+      method: "custom",
+      lines: [
+        "────────────────────────────────────────",
+        "← ☐ 管理密码 ☐ 对外端口 ☰ Review →",
+        "",
+        "ccLoad 管理后台需要设置一个登录密码 (CCLOAD_PASS)。你希望如何设置?",
+        "",
+        "❯ 1. 自动生成强密码",
+        "     (recommended) | 我生成一个 24 位随机强密码写入 .env，并会在最后告诉你明文",
+        "  2. 我自己提供",
+        "     你自己设置 CCLOAD_PASS (稍后告诉我，我会写入 .env)",
+        "  3. Type your own",
+        "",
+        "t question type · Enter confirm · N/Shift+N note · Esc dismiss · ? settings",
+        "────────────────────────────────────────",
+      ],
+    }));
+    const card = page.locator(".custom-ui-card");
+    await expect(card).toBeVisible();
+    const options = card.locator(".custom-ui-option");
+    await expect(options).toHaveCount(3);
+    // 当前行 ❯ 高亮；编号是 TUI 快捷键；描述行并入对应选项
+    await expect(options.nth(0)).toHaveClass(/selected/);
+    await expect(options.nth(0).locator("kbd")).toHaveText("1");
+    await expect(options.nth(0)).toContainText("自动生成强密码");
+    await expect(options.nth(0).locator(".custom-ui-option-desc")).toContainText("(recommended)");
+    await expect(options.nth(2)).toContainText("Type your own");
+    // 问题原文直接展示（不折叠），标签栏单独一行，键位页脚被丢弃
+    await expect(card).toContainText("你希望如何设置?");
+    await expect(card.locator("details.custom-ui-context")).toHaveCount(0);
+    await expect(card.locator(".custom-ui-tabs")).toContainText("管理密码");
+    await expect(card).not.toContainText("Esc dismiss");
+    // 点击选项发送对应数字键（pi-ask numberShortcut 语义）
+    await options.nth(1).click();
+    await expect.poll(async () => (await desktopCalls(page))
+      .filter((call) => (call.args?.body as { type?: string } | undefined)?.type === "extension_ui_input")
+      .map((call) => (call.args?.body as { data?: string }).data)).toEqual(["2"]);
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({ type: "extension_ui_request", id: "ask-3", method: "custom", lines: [], closed: true }));
+    await expect(card).toHaveCount(0);
+  });
+
+  test("权限系统双帧：任意选中标记行可点击，双击确认不卡循环", async ({ page }) => {
+    await expect.poll(() => desktopListenerCount(page, "pihub-agent-event")).toBe(1);
+    const envelope = (event: Record<string, unknown>) => ({
+      deviceId: "alpha",
+      deviceOrigin: "https://studio.tailnet.ts.net:30141",
+      sessionId: "session-1",
+      generation: 1,
+      event,
+    });
+    const uiInputs = async () => (await desktopCalls(page))
+      .filter((call) => (call.args?.body as { type?: string } | undefined)?.type === "extension_ui_input")
+      .map((call) => (call.args?.body as { data?: string }).data);
+    // 初始帧：权限系统的选中行标记是 ▶（不在常见标记字符集里）
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({
+      type: "extension_ui_request",
+      id: "perm-1",
+      method: "custom",
+      lines: [
+        "请求执行 bash 命令: timeout 30 curl -s https://example.com",
+        "",
+        "▶ (y) Yes",
+        "  (s) Yes, allow bash \"timeout *\" for this session",
+        "  (n) No",
+        "  (r) No, provide reason",
+        "",
+      ],
+    }));
+    const card = page.locator(".custom-ui-card");
+    await expect(card).toBeVisible();
+    let options = card.locator(".custom-ui-option");
+    await expect(options).toHaveCount(4);
+    await expect(options.nth(0)).toHaveClass(/selected/);
+    await expect(options.nth(0)).toContainText("Yes");
+    // 点击 (s)：发送 s，扩展进入 armed 帧（提示再按一次）
+    await options.nth(1).click();
+    await expect.poll(async () => (await uiInputs()).join(",")).toBe("s");
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({
+      type: "extension_ui_request",
+      id: "perm-1",
+      method: "custom",
+      lines: [
+        "请求执行 bash 命令: timeout 30 curl -s https://example.com",
+        "",
+        "  (y) Yes",
+        "▶ (s) Yes, allow bash \"timeout *\" for this session",
+        "  (n) No",
+        "  (r) No, provide reason",
+        "",
+        "Press s again to approve for this session.",
+      ],
+    }));
+    options = card.locator(".custom-ui-option");
+    await expect(options).toHaveCount(4);
+    // armed 行仍然是可点击按钮且高亮，提示行保留展示
+    await expect(options.nth(1)).toHaveClass(/selected/);
+    await expect(card).toContainText("Press s again to approve for this session.");
+    // 再点同一个按钮：发送第二次 s 完成确认
+    await options.nth(1).click();
+    await expect.poll(async () => (await uiInputs()).join(",")).toBe("s,s");
+    await emitDesktopEvent(page, "pihub-agent-event", envelope({ type: "extension_ui_request", id: "perm-1", method: "custom", lines: [], closed: true }));
+    await expect(card).toHaveCount(0);
+  });
+
+  test("@ 提及从文件索引补全并插入相对路径", async ({ page }) => {
+    const composer = page.getByRole("textbox", { name: "消息输入" });
+    await composer.click();
+    await composer.pressSequentially("@App");
+    const menu = page.locator(".mention-menu");
+    await expect(menu.getByText("@src/App.tsx")).toBeVisible();
+    await menu.getByText("@src/App.tsx").click();
+    await expect(composer).toHaveValue("@src/App.tsx ");
+    await expect(menu).toHaveCount(0);
+  });
+
+  test("文件面板右键菜单可将文件插入消息引用", async ({ page }) => {
+    const row = page.locator(".native-file-list > button", { hasText: "README.md" });
+    await expect(row).toBeVisible();
+    await row.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "在消息中引用" }).click();
+    await expect(page.getByRole("textbox", { name: "消息输入" })).toHaveValue("@README.md ");
+  });
+
+  test("连续纯工具调用消息合并为一个分组卡片", async ({ page }) => {
+    const composer = page.getByRole("textbox", { name: "消息输入" });
+    await composer.fill("跑两个命令");
+    await page.getByRole("button", { name: "发送消息" }).click();
+    await expect.poll(() => desktopListenerCount(page, "pihub-agent-event")).toBe(1);
+    const envelope = (event: Record<string, unknown>) => ({ deviceId: "alpha", deviceOrigin: "https://studio.tailnet.ts.net:30141", sessionId: "session-1", generation: 1, event });
+    const call = (id: string, command: string) => ({ type: "message_end", message: { role: "assistant", timestamp: Date.now(), model: "gpt-5", content: [{ type: "toolCall", id, name: "bash", arguments: { command } }] } });
+    const result = (id: string) => ({ type: "message_end", message: { role: "toolResult", toolCallId: id, timestamp: Date.now(), content: [{ type: "text", text: "done" }] } });
+    await emitDesktopEvent(page, "pihub-agent-event", envelope(call("c1", "ls")));
+    await emitDesktopEvent(page, "pihub-agent-event", envelope(result("c1")));
+    await emitDesktopEvent(page, "pihub-agent-event", envelope(call("c2", "pwd")));
+    await emitDesktopEvent(page, "pihub-agent-event", envelope(result("c2")));
+    const group = page.locator(".tool-group");
+    await expect(group).toHaveCount(1);
+    await expect(group.locator(".tool-group-head")).toContainText("2 个工具调用");
+    await expect(group.locator(".original-tool-call")).toHaveCount(2);
+    // 分组可整体折叠
+    await group.locator(".tool-group-head").click();
+    await expect(group.locator(".original-tool-call")).toHaveCount(0);
+  });
+
   test("中文 IME 确认 Enter 不误发送，组合结束后正常 Enter 才发送", async ({ page }) => {
     const composer = page.getByRole("textbox", { name: "消息输入" });
     await composer.focus();
@@ -594,7 +874,7 @@ test.describe("远程文件与 Git", () => {
     await expect(conflict).toBeVisible();
     await conflict.getByRole("button", { name: "覆盖上传" }).click();
     await expect.poll(async () => (await desktopSnapshot(page)).files.find(([path]) => path === "/projects/pihub/README.md")?.[1].content).toBe("replacement");
-    expect((await desktopCalls(page)).some((call) => call.command === "upload_remote_files" && String(call.args?.path).includes("conflict=overwrite"))).toBe(true);
+    expect((await desktopCalls(page)).some((call) => call.command === "upload_remote_commit" && String(call.args?.path).includes("conflict=overwrite"))).toBe(true);
   });
 
   test("Git 状态可打开逐行 diff 并返回变更列表", async ({ page }) => {
@@ -695,98 +975,151 @@ test.describe("模型配置", () => {
   });
 });
 
-test.describe("GitHub 签名更新", () => {
-  test("签名更新按排队、安装、重启、完成状态推进", async ({ page }) => {
-    await installDesktopMock(page, { updateScenario: "available" });
-    await page.goto("/?workspace=alpha");
-    await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
-    await page.getByRole("button", { name: "设备设置" }).click();
-    const dialog = page.getByRole("dialog", { name: "Studio Mac 设备中心" });
-    await dialog.getByRole("button", { name: "版本更新" }).click();
-    await expect(dialog.locator(".update-install-status")).toContainText("GitHub stable 签名通道");
-    await expect(dialog.locator(".setup-row").filter({ hasText: "PiHub Server" })).toContainText("当前 v0.0.1 · 最新 v0.0.2 · darwin/arm64");
-    await dialog.getByRole("button", { name: "安装签名更新" }).click();
+test.describe("Server 本地直传更新", () => {
+  test("检测到本地新包后经 SSH 直传安装，不再请求 GitHub 更新接口", async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 800 });
+    await seedLocalReleaseDir(page, "/tmp/pihub-release");
+    await installDesktopMock(page);
+    const dialog = await openUpdatesPanel(page);
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
 
-    await expect(dialog.getByText("更新已排队", { exact: true })).toBeVisible();
-    await expect(dialog.getByText("正在验证并安装", { exact: true })).toBeVisible({ timeout: 8_000 });
-    await expect(dialog.getByText("正在重启 PiHub Server", { exact: true })).toBeVisible({ timeout: 8_000 });
-    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible({ timeout: 10_000 });
-    const updateCalls = (await desktopCalls(page)).filter((call) => call.command === "agegr_request" && call.args?.path === "/api/pihub/updates" && call.args?.method === "POST");
-    expect(updateCalls).toHaveLength(1);
-    expect(updateCalls[0].args?.body).toEqual({ action: "apply" });
+    await expect(server).toContainText("当前 v0.0.1 · 本地包 v0.0.2");
+    await server.getByRole("button", { name: "直传安装 v0.0.2" }).click();
+    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible();
+    await expect(dialog.locator(".bootstrap-log")).toContainText("直传安装完成");
+    await expect(dialog.locator(".bootstrap-log")).not.toContainText("PIHUB_PAIRING_CODE");
+    await expect(server).toContainText("已就绪");
+
+    const bootstrapCalls = (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer");
+    expect(bootstrapCalls).toHaveLength(1);
+    expect(bootstrapCalls[0].args).toMatchObject({
+      host: "studio.tailnet.ts.net",
+      os: "darwin",
+      installDefaultExtensions: true,
+      localArchiveDir: "/tmp/pihub-release",
+      autoPair: false,
+    });
+    // 更新会重装默认插件，让 facade 指向新版本目录
+    expect((bootstrapCalls[0].args?.selectedExtensions as string[]).length).toBe(7);
+    expect((await desktopCalls(page)).filter((call) => call.args?.path === "/api/pihub/updates")).toHaveLength(0);
   });
 
-  test("服务端忙竞态要求二次确认，Esc 只关闭最上层且 force 不携带额外参数", async ({ page }) => {
-    await installDesktopMock(page, { updateScenario: "busy" });
-    await page.goto("/?workspace=alpha");
-    await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
-    await page.getByRole("button", { name: "设备设置" }).click();
-    const dialog = page.getByRole("dialog", { name: "Studio Mac 设备中心" });
-    await dialog.getByRole("button", { name: "版本更新" }).click();
-    await dialog.getByRole("button", { name: "安装签名更新" }).click();
-    const confirm = page.getByRole("alertdialog", { name: "有会话正在运行" });
+  test("有会话运行时需确认重启后才直传，Esc 只关闭最上层确认框", async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 800 });
+    await seedLocalReleaseDir(page, "/tmp/pihub-release");
+    await installDesktopMock(page);
+    const dialog = await openUpdatesPanel(page);
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
+    await expect(server.getByRole("button", { name: "直传安装 v0.0.2" })).toBeEnabled();
+    await setDesktopRunningSessions(page, ["session-1"]);
+
+    await server.getByRole("button", { name: "直传安装 v0.0.2" }).click();
+    const confirm = page.getByRole("alertdialog", { name: /有会话正在运行/ });
     await expect(confirm).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(confirm).toHaveCount(0);
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole("button", { name: "安装签名更新" })).toBeFocused();
-    await dialog.getByRole("button", { name: "安装签名更新" }).click();
-    await expect(confirm).toBeVisible();
-    await confirm.getByRole("button", { name: "仍要更新" }).click();
-    await expect(dialog.getByText("更新已排队", { exact: true })).toBeVisible();
+    await expect(server.getByRole("button", { name: "直传安装 v0.0.2" })).toBeFocused();
+    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(0);
 
-    const updateCalls = (await desktopCalls(page)).filter((call) => call.command === "agegr_request" && call.args?.path === "/api/pihub/updates" && call.args?.method === "POST");
-    expect(updateCalls).toHaveLength(3);
-    expect(updateCalls.map((call) => call.args?.body)).toEqual([{ action: "apply" }, { action: "apply" }, { action: "apply", force: true }]);
+    await server.getByRole("button", { name: "直传安装 v0.0.2" }).click();
+    await confirm.getByRole("button", { name: "强制更新" }).click();
+    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible();
+    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(1);
   });
 
-  test("无更新时明确显示当前版本已就绪", async ({ page }) => {
-    await installDesktopMock(page, { updateScenario: "none" });
-    await page.goto("/?workspace=alpha");
-    await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
-    await page.getByRole("button", { name: "设备设置" }).click();
-    const dialog = page.getByRole("dialog", { name: "Studio Mac 设备中心" });
-    await dialog.getByRole("button", { name: "版本更新" }).click();
+  test("组件版本与本地包不一致时提示直传同步组件", async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 800 });
+    await seedLocalReleaseDir(page, "/tmp/pihub-release");
+    await installDesktopMock(page, { localUpdateScenario: "none", staleComponent: "plugin" });
+    const dialog = await openUpdatesPanel(page);
+    const components = dialog.locator(".extension-status-panel").filter({ hasText: "组件版本" });
+
+    await expect(components).toContainText("有组件与本地包不一致");
+    await expect(components).toContainText("Todo Rail");
+    await expect(components).toContainText("v0.2.0 → v0.2.3");
+    await expect(components).toContainText("Pi Agent 运行时");
+
     const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
-    await expect(server).toContainText("当前 v0.0.1 · 最新 v0.0.1");
+    await server.getByRole("button", { name: "直传同步组件" }).click();
+    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible();
+    await expect(components).toContainText("与本地包一致");
+    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(1);
+  });
+
+  test("Linux 目标需填写 SSH 用户名，root 需显式二次确认", async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 800 });
+    await seedLocalReleaseDir(page, "/tmp/pihub-release");
+    await installDesktopMock(page, { serverOs: "linux" });
+    const dialog = await openUpdatesPanel(page);
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
+    await expect(server).toContainText("当前 v0.0.1 · 本地包 v0.0.2");
+    await server.getByRole("button", { name: "直传安装 v0.0.2" }).click();
+
+    const username = dialog.getByPlaceholder("Linux 用户名（例如 pi 或 ubuntu）");
+    await expect(username).toBeFocused();
+    await username.fill("root");
+    await dialog.getByRole("button", { name: "继续" }).click();
+    const confirm = page.getByRole("alertdialog", { name: /确认以 root 更新/ });
+    await expect(confirm).toBeVisible();
+    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(0);
+    await confirm.getByRole("button", { name: "以 root 安装" }).click();
+
+    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible();
+    const bootstrapCalls = (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer");
+    expect(bootstrapCalls).toHaveLength(1);
+    expect(bootstrapCalls[0].args).toMatchObject({ os: "linux", username: "root", autoPair: false, localArchiveDir: "/tmp/pihub-release" });
+  });
+
+  test("Windows 目标显示暂不支持直传更新", async ({ page }) => {
+    await seedLocalReleaseDir(page, "/tmp/pihub-release");
+    await installDesktopMock(page, { serverOs: "win32" });
+    const dialog = await openUpdatesPanel(page);
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
+    await expect(server).toContainText("Windows 目标暂不支持直传更新");
+    await expect(dialog.getByRole("button", { name: /直传安装/ })).toHaveCount(0);
+    expect((await desktopCalls(page)).filter((call) => call.command === "check_local_server_update")).toHaveLength(0);
+  });
+
+  test("未配置目录时使用内置默认目录正常检测", async ({ page }) => {
+    await installDesktopMock(page);
+    const dialog = await openUpdatesPanel(page);
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
+    await expect(server).toContainText("当前 v0.0.1 · 本地包 v0.0.2");
+    await expect(server.getByRole("button", { name: "直传安装 v0.0.2" })).toBeEnabled();
+    await expect(dialog.getByRole("alert")).toHaveCount(0);
+    const calls = (await desktopCalls(page)).filter((call) => call.command === "check_local_server_update");
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) expect(String(call.args?.directory)).toContain("release-artifacts");
+  });
+
+  test("本地包已最新时显示已就绪", async ({ page }) => {
+    await seedLocalReleaseDir(page, "/tmp/pihub-release");
+    await installDesktopMock(page, { localUpdateScenario: "none" });
+    const dialog = await openUpdatesPanel(page);
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
+    await expect(server).toContainText("当前 v0.0.1 · 本地包 v0.0.1");
     await expect(server).toContainText("已就绪");
-    await expect(dialog.getByRole("button", { name: "安装签名更新" })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: /直传安装/ })).toHaveCount(0);
   });
 
-  test("签名清单验证失败时拒绝进入安装态并允许重新检查", async ({ page }) => {
-    await installDesktopMock(page, { updateScenario: "signature-failure" });
-    await page.goto("/?workspace=alpha");
-    await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
-    await page.getByRole("button", { name: "设备设置" }).click();
-    const dialog = page.getByRole("dialog", { name: "Studio Mac 设备中心" });
-    await dialog.getByRole("button", { name: "版本更新" }).click();
-    await expect(dialog.getByRole("alert")).toHaveText("无法验证 GitHub 签名发布，请稍后重试。");
-    await expect(dialog.getByRole("button", { name: "重新检查" })).toBeVisible();
-    expect((await desktopCalls(page)).filter((call) => call.args?.path === "/api/pihub/updates" && call.args?.method === "POST")).toHaveLength(0);
+  test("本地目录没有匹配包时显示错误并可重新检查", async ({ page }) => {
+    await seedLocalReleaseDir(page, "/tmp/pihub-release");
+    await installDesktopMock(page, { localUpdateScenario: "missing" });
+    const dialog = await openUpdatesPanel(page);
+    await expect(dialog.getByRole("alert")).toContainText("没有匹配 darwin 平台的发布包");
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
+    await server.getByRole("button", { name: "重新检查" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("没有匹配 darwin 平台的发布包");
+    expect((await desktopCalls(page)).filter((call) => call.args?.path === "/api/pihub/updates")).toHaveLength(0);
   });
 
-  test("后台失败状态显示稳定错误码", async ({ page }) => {
-    await installDesktopMock(page, { updateScenario: "failed" });
-    await page.goto("/?workspace=alpha");
-    await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
-    await page.getByRole("button", { name: "设备设置" }).click();
-    const dialog = page.getByRole("dialog", { name: "Studio Mac 设备中心" });
-    await dialog.getByRole("button", { name: "版本更新" }).click();
-    const failure = dialog.getByRole("alert");
-    await expect(failure).toContainText("发布清单无效");
-    await expect(failure).toContainText("错误代码 invalid_manifest");
-  });
-
-  test("不支持应用内更新的最小窗口无溢出且通过 axe", async ({ page }) => {
+  test("暂不支持直传的最小窗口无溢出且通过 axe", async ({ page }) => {
     await page.setViewportSize({ width: 720, height: 620 });
-    await installDesktopMock(page, { updateScenario: "unsupported" });
-    await page.goto("/?workspace=alpha");
-    await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
-    await page.getByRole("button", { name: "设备设置" }).click();
-    const dialog = page.getByRole("dialog", { name: "Studio Mac 设备中心" });
-    await dialog.getByRole("button", { name: "版本更新" }).click();
-    await expect(dialog.locator(".update-install-status")).toContainText("稳定更新运行器未安装");
-    await expect(dialog.getByRole("button", { name: "此设备不支持应用内更新" })).toBeDisabled();
+    await seedLocalReleaseDir(page, "/tmp/pihub-release");
+    await installDesktopMock(page, { serverOs: "win32" });
+    const dialog = await openUpdatesPanel(page);
+    await expect(dialog.locator(".setup-row").filter({ hasText: "PiHub Server" })).toContainText("暂不支持直传更新");
     const bounds = await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
       return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth };
@@ -810,6 +1143,22 @@ test.describe("终端、主题与网络韧性", () => {
     await expect(page.locator(".remote-terminal-wrap").getByRole("alert")).toHaveText("远程终端连接已断开");
     await page.getByRole("tab", { name: "Git", exact: true }).click();
     await expect.poll(async () => (await desktopCalls(page)).filter((call) => call.command === "agegr_request" && call.args?.path === "/api/pihub/terminal" && (call.args?.body as { action?: string } | undefined)?.action === "close").length).toBe(1);
+  });
+
+  test("桌面端通过事件流接收终端输出", async ({ page }) => {
+    await installDesktopMock(page);
+    await page.goto("/?workspace=alpha");
+    await expect(page.getByRole("textbox", { name: "消息输入" })).toBeEnabled();
+    await page.getByRole("tab", { name: "终端", exact: true }).click();
+    await expect.poll(() => desktopListenerCount(page, "pihub-terminal-event")).toBe(1);
+    await emitDesktopEvent(page, "pihub-terminal-event", {
+      deviceId: "alpha",
+      deviceOrigin: "https://studio.tailnet.ts.net:30141",
+      terminalId: "terminal-1",
+      generation: 1,
+      event: { type: "output", data: "pihub-pty-stream-ok\r\n" },
+    });
+    await expect(page.locator(".xterm-rows")).toContainText("pihub-pty-stream-ok");
   });
 
   test("浅色主题持久化到重载后的工作台", async ({ page }) => {

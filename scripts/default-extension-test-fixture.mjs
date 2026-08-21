@@ -15,6 +15,16 @@ import {
 } from "./default-extension-bundle.mjs";
 
 const PI_PEERS = Object.freeze({
+  "@cortexkit/pi-magic-context": {
+    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@earendil-works/pi-tui": "^0.80.2",
+  },
+  "pi-todo-rail": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    typebox: "*",
+  },
   "@ff-labs/pi-fff": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
@@ -49,7 +59,9 @@ function packageDirectory(root, packageName) {
   return path.join(root, "node_modules", ...packageName.split("/"));
 }
 
-export async function addDefaultExtensionFixture(serverRoot, { version = "0.0.1" } = {}) {
+export async function addDefaultExtensionFixture(serverRoot, { version } = {}) {
+  const extensionsVersion = version
+    ?? (JSON.parse(fs.readFileSync(path.join(DEFAULT_EXTENSION_SOURCE_DIRECTORY, "package.json"), "utf8"))).version;
   const manifestPath = path.join(serverRoot, "package.json");
   const serverManifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   serverManifest.dependencies = {
@@ -103,10 +115,26 @@ export async function addDefaultExtensionFixture(serverRoot, { version = "0.0.1"
   });
   fs.writeFileSync(path.join(treeSitterRoot, "tree-sitter-bash.wasm"), "fixture wasm");
 
+  const onnxRoot = packageDirectory(extensionRoot, "onnxruntime-node");
+  writeJson(path.join(onnxRoot, "package.json"), {
+    name: "onnxruntime-node",
+    version: "1.24.3",
+    license: "MIT",
+    scripts: { postinstall: "node ./script/install" },
+  });
+
+  const sharpRoot = packageDirectory(extensionRoot, "sharp");
+  writeJson(path.join(sharpRoot, "package.json"), {
+    name: "sharp",
+    version: "0.34.5",
+    license: "Apache-2.0",
+    scripts: { install: "node install/check.js || npm run build" },
+  });
+
   const inventory = await createDefaultExtensionInventory(extensionRoot);
   fs.writeFileSync(path.join(extensionRoot, "inventory.json"), canonicalExtensionJson(inventory));
   const verification = await verifyDefaultExtensionBundle(extensionRoot, {
-    expectedVersion: version,
+    expectedVersion: extensionsVersion,
     serverRoot,
   });
   fs.writeFileSync(

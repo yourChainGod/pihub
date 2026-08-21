@@ -41,6 +41,15 @@ function assistantAnswerText(message: SessionMessage): string {
     .trim();
 }
 
+// Mirrors MessageView's merge rule: activity-only assistant entries (tool calls
+// and/or thinking, no answer text, no error) collapse into ONE group card, so a
+// run of them consumes a single .original-message element during measurement.
+function isActivityOnly(message: SessionMessage): boolean {
+  if (message.role !== "assistant" || message.stopReason === "error") return false;
+  const blocks = contentBlocks(message.content);
+  return blocks.length > 0 && blocks.every((block) => block.type === "toolCall" || block.type === "thinking");
+}
+
 /** Headings (h1–h3) from the answer markdown; falls back to the first paragraph line. */
 function extractOutline(markdown: string): OutlineItem[] {
   const lines = markdown.split("\n");
@@ -119,8 +128,27 @@ export default function ChatMinimap({ messages, scrollRef }: { messages: Session
     const next: Turn[] = [];
     let elementIndex = 0;
     let current: Turn | null = null;
-    for (const message of messages) {
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
       if (message.role !== "user" && message.role !== "assistant") continue;
+      if (isActivityOnly(message)) {
+        // toolResult entries are invisible and do not break a run (same rule as
+        // MessageView's groupMessages).
+        let end = index;
+        let scan = index + 1;
+        while (scan < messages.length) {
+          const candidate = messages[scan];
+          if (candidate.role === "toolResult") { scan += 1; continue; }
+          if (isActivityOnly(candidate)) { end = scan; scan += 1; continue; }
+          break;
+        }
+        if (end > index) {
+          // A merged run (≥2) renders one group card: a single element.
+          elementIndex += 1;
+          index = end;
+          continue;
+        }
+      }
       const renders = message.role === "user" || contentBlocks(message.content).length > 0 || message.stopReason === "error";
       const element = renders ? elements[elementIndex++] ?? null : null;
       if (message.role === "user") {
@@ -168,7 +196,7 @@ export default function ChatMinimap({ messages, scrollRef }: { messages: Session
     const scroll = scrollRef.current;
     const track = trackRef.current;
     if (!scroll || !track || !visible) return;
-    measure();
+    measureThrottled();
     const observer = new ResizeObserver(measureThrottled);
     observer.observe(scroll);
     if (scroll.firstElementChild) observer.observe(scroll.firstElementChild);

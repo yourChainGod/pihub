@@ -57,3 +57,18 @@ test("session access distinguishes authentication and capability failures but hi
   assert.equal(unavailable.response.status, 503);
   assert.match(unavailable.response.headers.get("cache-control") ?? "", /no-store/);
 });
+
+test("privateSessionJson gzips large bodies and keeps small ones identity", async () => {
+  const { gunzipSync } = await import("node:zlib");
+  const { privateSessionJson } = await jiti.import("./session-access.ts");
+
+  const small = privateSessionJson({ ok: true });
+  assert.equal(small.headers.get("content-encoding"), null);
+  assert.deepEqual(await small.json(), { ok: true });
+  assert.match(small.headers.get("content-type") ?? "", /application\/json/);
+
+  const big = privateSessionJson({ data: "x".repeat(8192) });
+  assert.equal(big.headers.get("content-encoding"), "gzip");
+  const decoded = JSON.parse(gunzipSync(Buffer.from(await big.arrayBuffer())).toString("utf8"));
+  assert.equal(decoded.data.length, 8192);
+});

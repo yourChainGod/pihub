@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 
 import {
+  isAuditedServerStagingPrivacyFinding,
   pruneServerDependencyTree,
   scanServerStagingTree,
 } from "./server-resource-privacy.mjs";
@@ -17,10 +18,11 @@ import { normalizeServerReleaseSbom } from "./server-release-sbom.mjs";
 import {
   assertExtensionBuildToolchain,
   DEFAULT_EXTENSION_NOTICE_FILE,
+  DEFAULT_EXTENSION_PACKAGES,
   isAuditedDefaultExtensionPrivacyFinding,
   stageDefaultExtensionBundle,
 } from "./default-extension-bundle.mjs";
-import { prepareSecureNpmEnvironment } from "./secure-npm-environment.mjs";
+import { npmSpawnInvocation, prepareSecureNpmEnvironment } from "./secure-npm-environment.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const serverDirectory = path.join(root, "server");
@@ -38,8 +40,8 @@ function argument(name, fallback) {
 function runNpm(args, cwd, maxBuffer = 64 * 1024 * 1024) {
   const prepared = prepareSecureNpmEnvironment("pihub-server-npm-");
   try {
-    const command = process.platform === "win32" ? "npm.cmd" : "npm";
-    const result = spawnSync(command, args, {
+    const invocation = npmSpawnInvocation(args);
+    const result = spawnSync(invocation.command, invocation.args, {
       cwd,
       encoding: "utf8",
       env: prepared.environment,
@@ -65,6 +67,7 @@ function sha256File(file) {
     input.on("end", () => resolve(hash.digest("hex")));
   });
 }
+
 
 function platformName() {
   if (process.platform === "darwin" || process.platform === "linux" || process.platform === "win32") {
@@ -115,6 +118,10 @@ const serverPackage = JSON.parse(fs.readFileSync(path.join(serverDirectory, "pac
 const version = serverPackage.version;
 if (serverPackage.name !== "@pihub/server" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
   throw new Error("Server package identity or version is invalid");
+}
+const piAgentVersion = serverPackage.dependencies?.["@earendil-works/pi-coding-agent"];
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(piAgentVersion ?? "")) {
+  throw new Error("Server release requires a pinned @earendil-works/pi-coding-agent version");
 }
 if (!fs.statSync(path.join(serverDirectory, ".next", "BUILD_ID"), { throwIfNoEntry: false })?.isFile()) {
   throw new Error("Server production build is missing; run npm run server:build first");
@@ -201,14 +208,16 @@ try {
     limits: {
       maxFiles: 50_000,
       maxFileBytes: 128 * 1024 * 1024,
-      maxTotalBytes: 700 * 1024 * 1024,
+      // The pinned extension tree includes onnxruntime + sharp native deps
+      // (~500MB); the scan limit bounds review work, not package size.
+      maxTotalBytes: 2048 * 1024 * 1024,
     },
   });
   const unreviewedPrivacyFindings = stagingScan.findings.filter(
     (finding) => !isAuditedDefaultExtensionPrivacyFinding(
       path.join(stageDirectory, "extensions"),
       finding,
-    ),
+    ) && !isAuditedServerStagingPrivacyFinding(stageDirectory, finding),
   );
   if (unreviewedPrivacyFindings.length > 0) {
     const finding = unreviewedPrivacyFindings[0];
@@ -245,39 +254,47 @@ try {
   });
   const archiveSha256 = await sha256File(archive);
 
-  const sbomName = `${baseName}.cdx.json`;
-  const sbom = path.join(outputDirectory, sbomName);
-  const serverSbomText = runNpm([
-    "sbom",
-    "--omit=dev",
-    "--package-lock-only",
-    "--sbom-format=cyclonedx",
-    "--sbom-type=application",
-  ], stageDirectory, 128 * 1024 * 1024);
-  const extensionSbomText = runNpm([
-    "sbom",
-    "--omit=dev",
-    "--omit=peer",
-    "--package-lock-only",
-    "--sbom-format=cyclonedx",
-    "--sbom-type=application",
-  ], path.join(stageDirectory, "extensions"), 128 * 1024 * 1024);
-  const sbomDocument = normalizeServerReleaseSbom(
-    JSON.parse(serverSbomText),
-    JSON.parse(extensionSbomText),
-    {
-    arch,
-    archiveName,
-    archiveSha256,
-    archiveSize: archiveInfo.size,
-    packageName: serverPackage.name,
-    platform,
-    stagingDirectory: stageDirectory,
-    version,
-    },
-  );
-  fs.writeFileSync(sbom, `${JSON.stringify(sbomDocument, null, 2)}\n`, { mode: 0o644 });
-  const sbomSha256 = await sha256File(sbom);
+  // Self-hosted local builds set PIHUB_LOCAL_BUILD=1: the intentional peer
+  // range exception for pi-magic-context makes `npm sbom` fail with
+  // ESBOMPROBLEMS, and local installs never consume the SBOM.
+  const skipSbom = process.env.PIHUB_LOCAL_BUILD === "1";
+  let sbomName = null;
+  let sbomSha256 = null;
+  if (!skipSbom) {
+    sbomName = `${baseName}.cdx.json`;
+    const sbom = path.join(outputDirectory, sbomName);
+    const serverSbomText = runNpm([
+      "sbom",
+      "--omit=dev",
+      "--package-lock-only",
+      "--sbom-format=cyclonedx",
+      "--sbom-type=application",
+    ], stageDirectory, 128 * 1024 * 1024);
+    const extensionSbomText = runNpm([
+      "sbom",
+      "--omit=dev",
+      "--omit=peer",
+      "--package-lock-only",
+      "--sbom-format=cyclonedx",
+      "--sbom-type=application",
+    ], path.join(stageDirectory, "extensions"), 128 * 1024 * 1024);
+    const sbomDocument = normalizeServerReleaseSbom(
+      JSON.parse(serverSbomText),
+      JSON.parse(extensionSbomText),
+      {
+      arch,
+      archiveName,
+      archiveSha256,
+      archiveSize: archiveInfo.size,
+      packageName: serverPackage.name,
+      platform,
+      stagingDirectory: stageDirectory,
+      version,
+      },
+    );
+    fs.writeFileSync(sbom, `${JSON.stringify(sbomDocument, null, 2)}\n`, { mode: 0o644 });
+    sbomSha256 = await sha256File(sbom);
+  }
 
   fs.writeFileSync(
     path.join(outputDirectory, `${archiveName}.sha256`),
@@ -294,8 +311,9 @@ try {
       filename: archiveName,
       sha256: archiveSha256,
       size: archiveInfo.size,
-      sbom: sbomName,
-      sbomSha256,
+      pi: { name: "@earendil-works/pi-coding-agent", version: piAgentVersion },
+      extensions: DEFAULT_EXTENSION_PACKAGES.map((entry) => ({ name: entry.name, version: entry.version })),
+      ...(sbomName ? { sbom: sbomName, sbomSha256 } : {}),
     }, null, 2)}\n`,
     { mode: 0o644 },
   );

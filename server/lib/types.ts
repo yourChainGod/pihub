@@ -305,6 +305,10 @@ export interface SessionInfo {
   messageCount: number;
   firstMessage: string;
   parentSessionId?: string; // set if this session was forked from another
+  /** The run was cut short (e.g. service restart): the session's last message
+   *  entry is a user prompt or tool result with no assistant answer after it.
+   *  Only set on persisted (non-running) sessions. */
+  interrupted?: boolean;
   /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
    *  Always set by the server; optional because the client builds transient
    *  SessionInfo objects before the first refresh. Fall back to cwd. */

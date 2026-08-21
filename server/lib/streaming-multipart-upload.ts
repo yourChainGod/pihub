@@ -14,9 +14,9 @@ import {
 } from "./file-upload";
 
 export const DEFAULT_MULTIPART_UPLOAD_LIMITS = Object.freeze({
-  maxRequestBytes: 101 * 1024 * 1024,
-  maxFileBytes: 25 * 1024 * 1024,
-  maxTotalFileBytes: 100 * 1024 * 1024,
+  maxRequestBytes: 1120 * 1024 * 1024,
+  maxFileBytes: 256 * 1024 * 1024,
+  maxTotalFileBytes: 1024 * 1024 * 1024,
   maxFiles: 256,
   maxHeaderPairs: 128,
 });

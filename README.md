@@ -8,9 +8,11 @@ PiHub 是一个面向 Pi Coding Agent 的私有多设备桌面工作台。桌面
 
 - 从本机 Tailscale 状态发现设备，或手动添加 `.ts.net`、Tailscale CGNAT/IPv6 地址。
 - 每台设备使用独立原生窗口，支持多项目、多会话、流式消息、停止与继续生成。
+- 消息支持逐条复制与代码块复制；输入框可用 `@` 引用工作区文件，文件面板右键也可直接插入引用。
+- 远端扩展的待办栏（Todo Rail）等 widget 会实时显示在输入区。
 - 浏览、编辑、上传、移动和删除已授权工作区内的文件。
 - 查看 Git 状态与 diff，创建、切换和移除 Git worktree。
-- 使用真实 PTY 终端：Unix 使用本机 shell，Windows 使用 ConPTY。
+- 使用真实 PTY 终端：Unix 使用本机 shell，Windows 使用 ConPTY；桌面端经签名 SSE 流实时接收输出。
 - 管理模型、Provider 凭据、插件、技能和项目信任。
 - 通过 SSH 发送短期 bootstrap；目标节点从固定 GitHub Release 验签下载并事务安装 Server，再注册当前用户的后台服务。
 - 桌面端和 Server 均从 GitHub 获取签名更新；Server 更新支持候选健康检查和事务回滚。
@@ -39,6 +41,8 @@ PiHub Server 127.0.0.1:30141
 ```
 
 Server 根页面只显示运行状态；完整工作台仅存在于桌面客户端。Server 实现和维护说明见 [`server/README.md`](server/README.md)。
+
+本轮实现、验证结果、未关闭风险和下一位维护者的执行顺序见 [`docs/worklog-handoff.zh-CN.md`](docs/worklog-handoff.zh-CN.md)。发布审计清单见 [`docs/audit-0.0.1.md`](docs/audit-0.0.1.md)，隐私门禁见 [`docs/privacy-audit.md`](docs/privacy-audit.md)。
 
 ## 平台支持
 
@@ -70,6 +74,26 @@ Windows 节点的首次 OpenSSH 配置见 [`docs/windows.md`](docs/windows.md)�
 - Windows：先按 [`docs/windows.md`](docs/windows.md) 配置 Windows OpenSSH Server；目标节点还需要 Node.js `22.19.0` 或更高版本。
 
 目标节点上的 bootstrap 只从固定的 `yourChainGod/pihub` GitHub Release 读取 Ed25519 签名清单，按 `darwin|linux|win32` 与 `arm64|x64` 选择独立资产，并校验重定向目标、大小、SHA-256、资产签名、归档结构、精确版本和候选健康状态。Unix 引导脚本会在缺少兼容 Node.js 时下载固定版本并校验 SHA-256；Windows 不自动安装 Node.js。部署完成后，PiHub Server 只监听 `127.0.0.1:30141`，远程入口由 Tailscale Serve 提供 HTTPS。
+
+### Server 与插件选择
+
+“SSH 一键安装”会先安装经过签名校验的 PiHub Server，然后显示同一签名 bundle 中的固定插件清单。插件不会从远端请求任意 npm 包，也没有在线安装或更新入口；每次选择都会在服务端再次按名称和精确版本校验。
+
+| 插件 | 固定版本 | 职责 |
+| --- | --- | --- |
+| `@cortexkit/pi-magic-context` | `0.38.0` | 持久上下文、压缩记忆与私有权限约束 |
+| `pi-todo-rail` | `0.2.3` | 当前项目和会话的待办栏 |
+| `@ff-labs/pi-fff` | `0.10.5` | 快速文件搜索 |
+| `pi-simplify` | `0.2.3` | 常用 Pi 工作流简化 |
+| `@gotgenes/pi-permission-system` | `26.3.0` | 命令与路径权限审查 |
+| `@eko24ive/pi-ask` | `1.2.0` | 交互式确认与提问 |
+| `@gotgenes/pi-subagents` | `19.3.2` | 受控子代理工具 |
+
+默认状态为全选；取消勾选只保留所选 facade。已配置好的设备可以勾选“仅安装 Server”，这会传递空插件集合，不改写或启用任何受管插件配置。设备设置页只读显示服务端实际安装状态和来源。
+
+Magic Context 与 Todo Rail 的职责是分开的：Todo Rail 负责活动待办，Magic Context 负责长期上下文。PiHub 强制写入 Magic Context 的安全配置，开启 compaction、私有权限和 fail-closed，并始终将 `todowrite.enabled` 与 `todowrite.overlay` 设为 `false`，避免两个待办系统重复呈现。
+
+远端 Pi Agent 目录中的 `AGENTS.md` 只有在文件不存在或内容去除空白后为空时才注入 PiHub 管理块；已有任何非空内容（包括用户规则）都会按字节保持不变，不追加、不覆盖、不合并。
 
 ### 3. 配对
 

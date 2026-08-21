@@ -3,6 +3,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readFile,
   readdir,
@@ -12,8 +13,9 @@ import {
   stat,
   symlink,
   unlink,
+  writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { createServer as createNetServer } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -40,7 +42,7 @@ const MANIFEST_SCHEMA_VERSION = 1;
 const EXTENSION_INVENTORY_SCHEMA_VERSION = 1;
 const CURRENT_POINTER_SCHEMA_VERSION = 1;
 const DEFAULT_EXTENSIONS_PREFERENCE_SCHEMA_VERSION = 1;
-const BOOTSTRAP_JOURNAL_SCHEMA_VERSION = 2;
+const BOOTSTRAP_JOURNAL_SCHEMA_VERSION = 4;
 const MANIFEST_SIGNATURE_DOMAIN = "PIHUB-RELEASE-MANIFEST-V1\n";
 const ASSET_SIGNATURE_DOMAIN = "PIHUB-RELEASE-ASSET-V1\n";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -61,6 +63,27 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const ASSET_TIMEOUT_MS = 10 * 60_000;
 const HEALTH_TIMEOUT_MS = 30_000;
 const MAX_HEALTH_BYTES = 32 * 1024;
+const AUTO_PAIR_TTL_SECONDS = 600;
+const AUTO_PAIR_CODE_PATTERN = /^pihub-[A-Za-z0-9_-]{43}$/;
+// Full capability set, mirroring the pairing section of server/README.md.
+const AUTO_PAIR_CAPABILITIES = Object.freeze([
+  "agents:use",
+  "sessions:read",
+  "sessions:write",
+  "files:read",
+  "files:write",
+  "workspaces:read",
+  "workspaces:manage",
+  "models:read",
+  "models:manage",
+  "providers:manage",
+  "packages:read",
+  "packages:manage",
+  "terminal:use",
+  "system:manage",
+  "system:update",
+  "devices:manage",
+]);
 const INTERNAL_NEXT_SENTINEL = "--pihub-internal-next-runtime-v1";
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const RELEASE_CDN_HOSTS = new Set([
@@ -113,6 +136,40 @@ function extensionPackages() {
   return Object.freeze(value.map((entry) => Object.freeze(entry)));
 }
 
+function selectedExtensionPackages(value) {
+  const all = extensionPackages();
+  if (value === undefined || value === null) return all;
+  if (!Array.isArray(value) || value.length > all.length) fail("Selected extension contract is invalid");
+  const allowed = new Map(all.map((entry) => [entry.name, entry]));
+  const seen = new Set();
+  const selected = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || !hasExactKeys(entry, ["name", "version"]) || seen.has(entry.name)) {
+      fail("Selected extension contract is invalid");
+    }
+    const expected = allowed.get(entry.name);
+    if (!expected || expected.version !== entry.version) fail("Selected extension contract is invalid");
+    seen.add(entry.name);
+    selected.push(expected);
+  }
+  return Object.freeze(selected);
+}
+
+function decodeSelectedExtensionArgument(encoded) {
+  if (!safeText(encoded, 16 * 1024) || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    fail("Selected extension argument is invalid");
+  }
+  let value;
+  try {
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.length > 12 * 1024 || bytes.toString("base64url") !== encoded) fail("Selected extension argument is invalid");
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    fail("Selected extension argument is invalid");
+  }
+  return selectedExtensionPackages(value);
+}
+
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -156,7 +213,7 @@ function skipWhitespace(text, start) {
   return index;
 }
 
-function assertNoDuplicateJsonKeys(text) {
+function assertNoDuplicateJsonKeys(text, maxNodes = 20_000) {
   let index = 0;
   let nodes = 0;
 
@@ -181,7 +238,7 @@ function assertNoDuplicateJsonKeys(text) {
 
   const parseValue = (depth) => {
     nodes += 1;
-    if (depth > 16 || nodes > 20_000) fail("Release manifest exceeds structural limits");
+    if (depth > 16 || nodes > maxNodes) fail("Release manifest exceeds structural limits");
     index = skipWhitespace(text, index);
     if (text[index] === "{") {
       index += 1;
@@ -1110,7 +1167,8 @@ function parseBootstrapJournal(raw) {
         "previousVersion",
         "previousPointerExisted",
         "defaultExtensionsEnabled",
-        "previousDefaultExtensionsEnabled",
+        "selectedExtensions",
+        "previousDefaultExtensions",
         "stagingId",
       ])
       || value.schemaVersion !== BOOTSTRAP_JOURNAL_SCHEMA_VERSION
@@ -1118,18 +1176,36 @@ function parseBootstrapJournal(raw) {
       || (value.previousVersion !== null && !isReleaseVersion(value.previousVersion))
       || typeof value.previousPointerExisted !== "boolean"
       || typeof value.defaultExtensionsEnabled !== "boolean"
-      || (value.previousDefaultExtensionsEnabled !== null && typeof value.previousDefaultExtensionsEnabled !== "boolean")
+      || !Array.isArray(value.selectedExtensions)
+      || (value.previousDefaultExtensions !== null && (
+        !isRecord(value.previousDefaultExtensions)
+        || !hasExactKeys(value.previousDefaultExtensions, ["enabled", "selectedExtensions"])
+        || typeof value.previousDefaultExtensions.enabled !== "boolean"
+        || !Array.isArray(value.previousDefaultExtensions.selectedExtensions)
+      ))
       || !STAGING_ID_PATTERN.test(value.stagingId)
       || canonicalizeReleaseJson(value) !== raw) {
     fail("Bootstrap recovery journal is invalid");
   }
+  selectedExtensionPackages(value.selectedExtensions);
+  if (value.defaultExtensionsEnabled !== (value.selectedExtensions.length > 0)) {
+    fail("Bootstrap recovery journal is invalid");
+  }
+  if (value.previousDefaultExtensions !== null) {
+    selectedExtensionPackages(value.previousDefaultExtensions.selectedExtensions);
+    if (value.previousDefaultExtensions.enabled !== (value.previousDefaultExtensions.selectedExtensions.length > 0)) {
+      fail("Bootstrap recovery journal is invalid");
+    }
+  }
   return value;
 }
 
-function defaultExtensionsPreferenceText(enabled) {
+function defaultExtensionsPreferenceText(enabled, selectedPackages = enabled ? extensionPackages() : []) {
+  const selected = selectedExtensionPackages(selectedPackages);
   return canonicalizeReleaseJson({
     schemaVersion: DEFAULT_EXTENSIONS_PREFERENCE_SCHEMA_VERSION,
     enabled,
+    ...(enabled ? { selectedPackages: selected.map(({ name, version }) => ({ name, version })) } : {}),
   });
 }
 
@@ -1140,13 +1216,24 @@ function parseDefaultExtensionsPreference(raw) {
   } catch {
     fail("Default extension preference is invalid");
   }
-  if (!isRecord(value) || !hasExactKeys(value, ["schemaVersion", "enabled"])
+  if (!isRecord(value)
       || value.schemaVersion !== DEFAULT_EXTENSIONS_PREFERENCE_SCHEMA_VERSION
       || typeof value.enabled !== "boolean"
       || canonicalizeReleaseJson(value) !== raw) {
     fail("Default extension preference is invalid");
   }
-  return value.enabled;
+  const keys = Object.keys(value).sort();
+  const legacyKeys = ["enabled", "schemaVersion"].sort();
+  const selectedKeys = ["enabled", "schemaVersion", "selectedPackages"].sort();
+  if ((keys.length !== legacyKeys.length && keys.length !== selectedKeys.length)
+      || !keys.every((key, index) => key === (keys.length === legacyKeys.length ? legacyKeys : selectedKeys)[index])) {
+    fail("Default extension preference is invalid");
+  }
+  const selectedExtensions = value.enabled
+    ? (keys.length === legacyKeys.length ? extensionPackages() : selectedExtensionPackages(value.selectedPackages))
+    : [];
+  if (value.enabled !== (selectedExtensions.length > 0)) fail("Default extension preference is invalid");
+  return { enabled: value.enabled, selectedExtensions };
 }
 
 async function restorePointer(currentFile, previousPointerExisted, previousVersion) {
@@ -1159,13 +1246,13 @@ async function restorePointer(currentFile, previousPointerExisted, previousVersi
   }
 }
 
-async function restoreDefaultExtensionsPreference(file, previousEnabled) {
-  if (previousEnabled === null) {
+async function restoreDefaultExtensionsPreference(file, previousPreference) {
+  if (previousPreference === null) {
     await unlink(file).catch((error) => {
       if (error?.code !== "ENOENT") throw error;
     });
   } else {
-    await atomicWritePrivate(file, defaultExtensionsPreferenceText(previousEnabled));
+    await atomicWritePrivate(file, defaultExtensionsPreferenceText(previousPreference.enabled, previousPreference.selectedExtensions));
   }
 }
 
@@ -1175,12 +1262,12 @@ async function recoverBootstrapJournal(paths, options = {}) {
   const journal = parseBootstrapJournal(raw);
   if (journal.phase === "switching") {
     await restorePointer(paths.currentFile, journal.previousPointerExisted, journal.previousVersion);
-    await restoreDefaultExtensionsPreference(paths.defaultExtensionsPreferenceFile, journal.previousDefaultExtensionsEnabled);
+    await restoreDefaultExtensionsPreference(paths.defaultExtensionsPreferenceFile, journal.previousDefaultExtensions);
   } else if (journal.phase === "service") {
     const versionRoot = path.join(paths.versionsDirectory, journal.version);
-    await validateBundledRuntime(versionRoot, journal.version, journal.defaultExtensionsEnabled);
+    await validateBundledRuntime(versionRoot, journal.version, journal.selectedExtensions);
     await installPiLauncher(paths, { ...options, platform: options.target?.platform ?? process.platform });
-    if (journal.defaultExtensionsEnabled) await provisionBundledExtensions(versionRoot, options);
+    if (journal.defaultExtensionsEnabled) await provisionBundledExtensions(versionRoot, options, journal.selectedExtensions);
     await runServiceInstaller(versionRoot, options);
     await writeJournal(paths, journal, "committing");
   }
@@ -1256,6 +1343,8 @@ async function readPackageMetadata(packageRoot, expectedName, expectedVersion) {
 }
 
 const EXTENSION_RESOURCE_LAYOUT = Object.freeze({
+  "@cortexkit/pi-magic-context": { extensions: ["dist/index.js"] },
+  "pi-todo-rail": { extensions: ["index.ts"] },
   "@ff-labs/pi-fff": { extensions: ["src/index.ts"] },
   "pi-simplify": { extensions: ["dist/index.js"] },
   "@gotgenes/pi-permission-system": { extensions: ["src/index.ts"] },
@@ -1284,11 +1373,14 @@ function exactExtensionDependencies(value, expected) {
   return expected.every((entry) => value[entry.name] === entry.version);
 }
 
-function parseExtensionInventory(raw, expectedPackages) {
+export function parseExtensionInventory(raw, expectedPackages) {
   if (Buffer.byteLength(raw, "utf8") === 0 || Buffer.byteLength(raw, "utf8") > MAX_EXTENSION_INVENTORY_BYTES) {
     fail("Bundled extension inventory exceeds the size limit");
   }
-  assertNoDuplicateJsonKeys(raw);
+  // The inventory lists one {path,size,sha256} object per bundled file; scale
+  // the node cap with the file cap (4 nodes per entry plus envelope) so a
+  // legitimate full bundle is not rejected as a structural attack.
+  assertNoDuplicateJsonKeys(raw, MAX_EXTENSION_FILES * 4 + 64);
   let inventory;
   try {
     inventory = JSON.parse(raw);
@@ -1530,7 +1622,7 @@ async function validateBundledRuntime(root, version, withExtensions) {
   const agentRoot = packagePath(root, PI_AGENT_PACKAGE);
   await readPackageMetadata(agentRoot, PI_AGENT_PACKAGE, PI_AGENT_VERSION);
   await assertRegularFile(path.join(agentRoot, "dist", "cli.js"), "Bundled Pi CLI");
-  if (withExtensions) {
+  if ((Array.isArray(withExtensions) ? withExtensions.length > 0 : withExtensions === true)) {
     await validateExtensionBundle(root, version);
     for (const relative of [
       "bin/default-extensions.js",
@@ -1578,11 +1670,12 @@ async function sameRegularTree(left, right) {
   return compare(left, right);
 }
 
-async function provisionBundledExtensions(versionRoot, options = {}) {
+async function provisionBundledExtensions(versionRoot, options = {}, selectedPackages = extensionPackages()) {
   if (options.extensionProvisioner) {
     const result = await options.extensionProvisioner(versionRoot, {
       environment: options.env,
       expectedPackages: extensionPackages(),
+      selectedPackages,
       home: options.home,
     });
     return typeof result === "function" ? result : result?.rollback;
@@ -1597,26 +1690,42 @@ async function provisionBundledExtensions(versionRoot, options = {}) {
   const result = await api.provisionDefaultExtensions(versionRoot, {
     environment: options.env,
     expectedPackages: extensionPackages(),
+    selectedPackages,
     home: options.home,
   });
+  const selectedNames = new Set(selectedPackages.map((entry) => entry.name));
+  const statusPackages = isRecord(result?.status) && Array.isArray(result.status.packages)
+    ? result.status.packages
+    : [];
+  const selectedInstalled = statusPackages.filter((entry) =>
+    isRecord(entry) && selectedNames.has(entry.name) && entry.installed === true,
+  ).length;
+  const unselectedEnabled = statusPackages.some((entry) =>
+    isRecord(entry) && !selectedNames.has(entry.name) && entry.installed === true,
+  );
   if (!isRecord(result) || typeof result.rollback !== "function"
-      || !isRecord(result.status) || result.status.installed !== true
-      || result.status.installedCount !== extensionPackages().length
+      || !isRecord(result.status) || result.status.installedCount !== selectedPackages.length
       || result.status.total !== extensionPackages().length
-      || result.status.source !== "signed-release") {
+      || result.status.source !== "signed-release"
+      || selectedInstalled !== selectedPackages.length
+      || unselectedEnabled) {
     await result?.rollback?.().catch(() => undefined);
     fail("Signed default extension provisioner did not verify the installed extensions");
   }
   return result.rollback;
 }
 
-function sanitizedChildEnvironment(source = process.env, overrides = {}) {
+export function sanitizedChildEnvironment(source = process.env, overrides = {}) {
   const exact = new Set([
     "PATH", "HOME", "USERPROFILE", "USER", "LOGNAME", "USERNAME", "SHELL", "COMSPEC",
     "TEMP", "TMP", "TMPDIR", "LANG", "LANGUAGE", "TZ", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
     "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "DBUS_SESSION_BUS_ADDRESS", "PATHEXT",
     "SystemRoot", "WINDIR", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "ProgramData",
     "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "PI_CODING_AGENT_DIR", "TAILSCALE_SOCKET",
+    // Root/admin installs are gated on these explicit opt-ins (desktop danger
+    // confirmation); the service-installer child must inherit them.
+    "PIHUB_ALLOW_ROOT",
+    "PIHUB_ALLOW_ADMIN",
     "TS_SOCKET",
   ]);
   const result = { NODE_ENV: "production" };
@@ -1778,6 +1887,9 @@ if (root !== versions && !root.startsWith(versions + path.sep)) throw new Error(
 const entry = path.join(root, "bin", "runtime-entry.js");
 const info = lstatSync(entry);
 if (!info.isFile() || info.isSymbolicLink()) throw new Error("PiHub runtime entry is invalid");
+// Importing runtime-entry.js leaves require.main undefined; the marker tells
+// it this process is the pi launcher, not the Next supervisor.
+process.env.PIHUB_STANDALONE_LAUNCHER = "1";
 await import(pathToFileURL(entry).href);
 `;
 }
@@ -1809,10 +1921,106 @@ async function installPiLauncher(paths, options = {}) {
   }
 }
 
+async function stageLocalArchive(source, destination) {
+  const info = await lstat(source);
+  if (!info.isFile() || info.isSymbolicLink()) fail("Local release archive is not a regular file");
+  if (info.size <= 0 || info.size > MAX_ASSET_BYTES) fail("Local release archive size is invalid");
+  let handle;
+  try {
+    handle = await open(destination, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(source)) {
+      hash.update(chunk);
+      await handle.write(chunk);
+    }
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await chmod(destination, 0o600);
+    return { size: info.size, sha256: hash.digest("hex") };
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await rm(destination, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function readBundledServerVersion(root) {
+  const raw = await readRegularFileBounded(path.join(root, "package.json"), MAX_PACKAGE_JSON_BYTES);
+  if (raw === null) fail("Local release archive does not contain the Server package");
+  let metadata;
+  try {
+    metadata = JSON.parse(raw);
+  } catch {
+    fail("Local release archive Server package metadata is invalid");
+  }
+  if (!isRecord(metadata) || metadata.name !== "@pihub/server" || !isReleaseVersion(metadata.version)) {
+    fail("Local release archive Server version is invalid");
+  }
+  return metadata.version;
+}
+
+function normalizeLocalAssetOption(value) {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) fail("Local release archive option is invalid");
+  const archivePath = safeAbsolutePath(value.path, "Local release archive");
+  if (typeof value.sha256 !== "string" || !SHA256_PATTERN.test(value.sha256)) {
+    fail("Local release archive sha256 is invalid");
+  }
+  return Object.freeze({ path: archivePath, sha256: value.sha256 });
+}
+
+// Issues a one-time pairing code against the freshly installed Server's own
+// auth state. The code is returned to the caller (stdout marker line) and the
+// grant file never persists beyond this function's temp directory.
+async function issueAutoPairingCode(versionRoot) {
+  await assertRegularFile(path.join(versionRoot, "bin", "pihub-auth-admin.js"), "Server pairing admin tool");
+  const directory = await mkdtemp(path.join(tmpdir(), "pihub-pairing-"));
+  await chmod(directory, 0o700);
+  try {
+    const request = path.join(directory, "pairing-request.json");
+    const grant = path.join(directory, "pairing-grant.json");
+    await writeFile(request, JSON.stringify({
+      label: "PiHub Desktop (auto-pair)",
+      ttlSeconds: AUTO_PAIR_TTL_SECONDS,
+      capabilities: AUTO_PAIR_CAPABILITIES,
+    }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const child = spawn(
+      process.execPath,
+      [path.join(versionRoot, "bin", "pihub-auth-admin.js"), "issue", "--input", request, "--output", grant],
+      { cwd: versionRoot, env: sanitizedChildEnvironment(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+    );
+    const stdout = captureBounded(child.stdout);
+    const stderr = captureBounded(child.stderr);
+    const result = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    if (result.code !== 0) fail(`Server pairing admin tool failed: ${stderr() || stdout()}`.slice(0, 512));
+    const text = await readFile(grant, "utf8");
+    let value;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      fail("Server pairing grant is invalid");
+    }
+    if (!isRecord(value) || typeof value.code !== "string" || !AUTO_PAIR_CODE_PATTERN.test(value.code)) {
+      fail("Server pairing grant is invalid");
+    }
+    return value.code;
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 export async function installStandaloneRelease(options = {}) {
   const target = options.target ?? detectReleaseTarget(options.targetOptions);
   if (process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() === 0 && !options.allowRootForTests) {
-    fail("PiHub Server must be installed as an unprivileged signed-in user");
+    // Root installs are allowed only when the desktop user explicitly confirmed
+    // them; the rendered bootstrap then exports PIHUB_ALLOW_ROOT=1.
+    if (process.env.PIHUB_ALLOW_ROOT !== "1") {
+      fail("PiHub Server must be installed as an unprivileged signed-in user (root requires explicit confirmation in PiHub Desktop)");
+    }
   }
   const trust = options.trust ?? createReleaseTrust({
     owner: RELEASE_OWNER,
@@ -1826,30 +2034,65 @@ export async function installStandaloneRelease(options = {}) {
     options.dataRoot ?? getServerDataRoot({ platform: target.platform, env: options.env, home: options.home }),
     "Server data root",
   );
+  const localAsset = normalizeLocalAssetOption(options.localAsset);
   const paths = await initializeReleasePaths(dataRoot, { ...options, target });
   const currentRaw = await readRegularFileBounded(paths.currentFile, 16 * 1024);
   const current = currentRaw === null ? null : parseCurrentPointer(currentRaw);
   const previousPreferenceRaw = await readRegularFileBounded(paths.defaultExtensionsPreferenceFile, 16 * 1024);
-  const previousDefaultExtensionsEnabled = previousPreferenceRaw === null
+  const previousDefaultExtensions = previousPreferenceRaw === null
     ? null
     : parseDefaultExtensionsPreference(previousPreferenceRaw);
-  const manifest = await fetchVerifiedManifest(trust, options);
-  if (compareReleaseVersions(manifest.version, minimumVersion) < 0) fail("Signed Server release is older than this PiHub Desktop");
-  if (current?.version && compareReleaseVersions(manifest.version, current.version) < 0) {
-    fail("Signed Server release downgrade is blocked");
-  }
-  const asset = manifest.assets.find((entry) => entry.platform === target.platform && entry.arch === target.arch);
-  if (!asset) fail("Signed Server release has no compatible asset");
-  const withExtensions = options.withExtensions === true;
+  const selectedPackages = options.selectedExtensions === undefined
+    ? (options.withExtensions === true ? extensionPackages() : Object.freeze([]))
+    : selectedExtensionPackages(options.selectedExtensions);
+  // An update that carries no extension selection must not silently disable
+  // the extensions a previous install provisioned: inherit that preference so
+  // facades get re-pointed at the new version directory.
+  const effectivePackages = selectedPackages.length > 0
+    ? selectedPackages
+    : previousDefaultExtensions?.enabled
+      ? previousDefaultExtensions.selectedExtensions
+      : selectedPackages;
+  const withExtensions = effectivePackages.length > 0;
   const staging = await makePrivateStaging(paths);
+  let asset = null;
+  let version;
+  if (localAsset) {
+    // Local archive mode: the desktop uploaded a prebuilt tarball over SSH;
+    // integrity comes from the pinned sha256 instead of the GitHub signature
+    // chain. Extraction and structural validation are identical afterwards.
+    try {
+      const staged = await stageLocalArchive(localAsset.path, staging.archive);
+      if (staged.sha256 !== localAsset.sha256) fail("Local release archive integrity verification failed");
+      await extractStandaloneArchive(staging.archive, staging.candidate, staged.size);
+      version = await readBundledServerVersion(staging.candidate);
+    } catch (error) {
+      await rm(staging.root, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+    if (compareReleaseVersions(version, minimumVersion) < 0) fail("Local Server release is older than this PiHub Desktop");
+    if (current?.version && compareReleaseVersions(version, current.version) < 0) {
+      fail("Local Server release downgrade is blocked");
+    }
+  } else {
+    const manifest = await fetchVerifiedManifest(trust, options);
+    version = manifest.version;
+    if (compareReleaseVersions(version, minimumVersion) < 0) fail("Signed Server release is older than this PiHub Desktop");
+    if (current?.version && compareReleaseVersions(version, current.version) < 0) {
+      fail("Signed Server release downgrade is blocked");
+    }
+    asset = manifest.assets.find((entry) => entry.platform === target.platform && entry.arch === target.arch);
+    if (!asset) fail("Signed Server release has no compatible asset");
+  }
   let journal = {
     schemaVersion: BOOTSTRAP_JOURNAL_SCHEMA_VERSION,
-    phase: "downloading",
-    version: manifest.version,
+    phase: localAsset ? "extracting" : "downloading",
+    version,
     previousVersion: current?.version ?? null,
     previousPointerExisted: currentRaw !== null,
     defaultExtensionsEnabled: withExtensions,
-    previousDefaultExtensionsEnabled,
+    selectedExtensions: effectivePackages,
+    previousDefaultExtensions,
     stagingId: staging.id,
   };
   let published = false;
@@ -1860,15 +2103,17 @@ export async function installStandaloneRelease(options = {}) {
   let rollbackExtensionProvisioning = null;
   await atomicWritePrivate(paths.journalFile, canonicalizeReleaseJson(journal));
   try {
-    await downloadVerifiedAsset(asset, trust, staging.archive, options);
-    journal = await writeJournal(paths, journal, "extracting");
-    await extractStandaloneArchive(staging.archive, staging.candidate, asset.size);
-    await validateBundledRuntime(staging.candidate, manifest.version, withExtensions);
+    if (asset) {
+      await downloadVerifiedAsset(asset, trust, staging.archive, options);
+      journal = await writeJournal(paths, journal, "extracting");
+      await extractStandaloneArchive(staging.archive, staging.candidate, asset.size);
+    }
+    await validateBundledRuntime(staging.candidate, version, effectivePackages);
     await verifyPiCli(staging.candidate, { ...options, stagingRoot: staging.root });
     journal = await writeJournal(paths, journal, "candidate-health");
-    await runCandidateHealth(staging.candidate, manifest.version, { ...options, stagingRoot: staging.root });
+    await runCandidateHealth(staging.candidate, version, { ...options, stagingRoot: staging.root });
     journal = await writeJournal(paths, journal, "publishing");
-    const destination = path.join(paths.versionsDirectory, manifest.version);
+    const destination = path.join(paths.versionsDirectory, version);
     try {
       const existing = await lstat(destination);
       if (!existing.isDirectory() || existing.isSymbolicLink() || !(await sameRegularTree(staging.candidate, destination))) {
@@ -1882,22 +2127,22 @@ export async function installStandaloneRelease(options = {}) {
       await syncDirectory(paths.versionsDirectory);
       published = true;
     }
-    await validateBundledRuntime(destination, manifest.version, withExtensions);
+    await validateBundledRuntime(destination, version, effectivePackages);
     journal = await writeJournal(paths, journal, "switching");
-    await atomicWritePrivate(paths.currentFile, currentPointerText(manifest.version));
+    await atomicWritePrivate(paths.currentFile, currentPointerText(version));
     pointerChanged = true;
-    await atomicWritePrivate(paths.defaultExtensionsPreferenceFile, defaultExtensionsPreferenceText(withExtensions));
+    await atomicWritePrivate(paths.defaultExtensionsPreferenceFile, defaultExtensionsPreferenceText(withExtensions, effectivePackages));
     preferenceChanged = true;
     await installPiLauncher(paths, { ...options, platform: target.platform });
     journal = await writeJournal(paths, journal, "service");
-    if (withExtensions) rollbackExtensionProvisioning = await provisionBundledExtensions(destination, options);
+    if (withExtensions) rollbackExtensionProvisioning = await provisionBundledExtensions(destination, options, effectivePackages);
     serviceAttempted = true;
     await runServiceInstaller(destination, options);
     serviceCompleted = true;
     journal = await writeJournal(paths, journal, "committing");
     await unlink(paths.journalFile).catch(() => undefined);
     await rm(staging.root, { recursive: true, force: true }).catch(() => undefined);
-    return Object.freeze({ version: manifest.version, installed: current?.version !== manifest.version || published });
+    return Object.freeze({ version, installed: current?.version !== version || published });
   } catch (error) {
     const rollbackErrors = [];
     if (rollbackExtensionProvisioning) {
@@ -1910,7 +2155,7 @@ export async function installStandaloneRelease(options = {}) {
     if (preferenceChanged) {
       await restoreDefaultExtensionsPreference(
         paths.defaultExtensionsPreferenceFile,
-        previousDefaultExtensionsEnabled,
+        previousDefaultExtensions,
       ).catch((failure) => rollbackErrors.push(failure));
     }
     if (pointerChanged) {
@@ -1920,13 +2165,13 @@ export async function installStandaloneRelease(options = {}) {
     if (serviceCompleted) {
       const rollbackRoot = current?.version
         ? path.join(paths.versionsDirectory, current.version)
-        : path.join(paths.versionsDirectory, manifest.version);
+        : path.join(paths.versionsDirectory, version);
       const rollbackCommand = current?.version ? "install" : "uninstall";
       await runServiceInstaller(rollbackRoot, options, rollbackCommand)
         .catch((failure) => rollbackErrors.push(failure));
     }
     if (published && !serviceAttempted) {
-      await rm(path.join(paths.versionsDirectory, manifest.version), { recursive: true, force: true }).catch(() => undefined);
+      await rm(path.join(paths.versionsDirectory, version), { recursive: true, force: true }).catch(() => undefined);
     }
     await rm(staging.root, { recursive: true, force: true }).catch(() => undefined);
     await unlink(paths.journalFile).catch(() => undefined);
@@ -1939,12 +2184,32 @@ export async function installStandaloneRelease(options = {}) {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length > 1 || (args[0] !== undefined && args[0] !== "--with-extensions")) {
+  if (args.length > 1 || (args[0] !== undefined && args[0] !== "--with-extensions" && !args[0].startsWith("--with-extensions="))) {
     fail("Invalid PiHub standalone bootstrap arguments");
   }
-  const result = await installStandaloneRelease({ withExtensions: args[0] === "--with-extensions" });
+  let selectedExtensions;
+  if (args[0] === "--with-extensions") selectedExtensions = extensionPackages();
+  else if (args[0]?.startsWith("--with-extensions=")) {
+    selectedExtensions = decodeSelectedExtensionArgument(args[0].slice("--with-extensions=".length));
+  } else selectedExtensions = Object.freeze([]);
+  const localArchive = process.env.PIHUB_LOCAL_ARCHIVE;
+  const result = await installStandaloneRelease({
+    selectedExtensions,
+    localAsset: localArchive === undefined
+      ? undefined
+      : { path: localArchive, sha256: process.env.PIHUB_LOCAL_ARCHIVE_SHA256 },
+  });
   console.log(result.installed ? "PIHUB_SERVER_INSTALLED" : "PIHUB_SERVER_SKIPPED");
   console.log(`PIHUB_SERVER_VERSION=${result.version}`);
+  if (process.env.PIHUB_AUTO_PAIR === "1") {
+    try {
+      const versionRoot = path.join(getServerDataRoot(), "versions", result.version);
+      const code = await issueAutoPairingCode(versionRoot);
+      console.log(`PIHUB_PAIRING_CODE=${code}`);
+    } catch (error) {
+      console.error(`[pihub] 自动配对签发失败：${error instanceof Error ? error.message : "unknown error"}（安装已完成，可稍后在目标机手动签发配对码）`);
+    }
+  }
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";

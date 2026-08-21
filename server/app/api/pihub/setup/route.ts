@@ -80,6 +80,24 @@ function bundledPiCli(): string | null {
   }
 }
 
+function bundledPiVersion(): string | null {
+  // In the packaged build getPackageDir() can resolve into the bundled .next
+  // tree, so read the pinned dependency's own package.json from the release
+  // root first and only fall back to the SDK's resolution.
+  const candidates = [
+    path.join(serverPackageRoot(), "node_modules", "@earendil-works", "pi-coding-agent", "package.json"),
+    (() => { try { return path.join(fs.realpathSync(getPackageDir()), "package.json"); } catch { return null; } })(),
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const version: unknown = (JSON.parse(fs.readFileSync(candidate, "utf8")) as Record<string, unknown>).version;
+      if (typeof version === "string" && version.length > 0) return version;
+    } catch { /* try the next candidate */ }
+  }
+  return null;
+}
+
 async function windowsServiceRunning(name: string, signal: AbortSignal): Promise<boolean> {
   if (process.platform !== "win32") return false;
   const systemRoot = absoluteWindowsEnvironmentPath("SystemRoot");
@@ -193,7 +211,7 @@ async function status(signal: AbortSignal) {
       serveEnabled: serve.enabled,
       serveUrl: serve.url,
     },
-    pi: { installed: piInstalled },
+    pi: { installed: piInstalled, version: piInstalled ? bundledPiVersion() : null },
     provider: { installed: providerInstalled, source: "PiHub Server 内置 NewAPI Provider" },
     defaultExtensions,
     server: { installed: serverPackage !== null, packageName: "@pihub/server", version: serverPackage, running: true },

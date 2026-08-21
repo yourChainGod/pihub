@@ -191,9 +191,9 @@ test("wire, file, aggregate, and count limits fail closed without residue", asyn
   const directory = temporaryDirectory(t);
   const boundary = "limit-boundary";
   const defaults = upload.DEFAULT_MULTIPART_UPLOAD_LIMITS;
-  assert.equal(defaults.maxRequestBytes, 101 * 1024 * 1024);
-  assert.equal(defaults.maxFileBytes, 25 * 1024 * 1024);
-  assert.equal(defaults.maxTotalFileBytes, 100 * 1024 * 1024);
+  assert.equal(defaults.maxRequestBytes, 1120 * 1024 * 1024);
+  assert.equal(defaults.maxFileBytes, 256 * 1024 * 1024);
+  assert.equal(defaults.maxTotalFileBytes, 1024 * 1024 * 1024);
   assert.equal(defaults.maxFiles, 256);
 
   const cases = [

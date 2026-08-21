@@ -141,26 +141,27 @@ test("allowed roots are canonical, identity-scoped, and revocable", async (t) =>
   assert.equal(getRevokedAllowedRoots(scopeA).has(key), false);
 });
 
-test("canonical root validation rejects filesystem, home, system, and file roots", async (t) => {
+test("canonical root validation rejects only the filesystem root and non-directories", async (t) => {
   const { AllowedRootError, canonicalizeAllowedFileRoot } = await loadAllowedRoots();
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-root-policy-"));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   const file = path.join(base, "file.txt");
   fs.writeFileSync(file, "not a directory");
+  // Self-hosted tailnet policy: home and system directories are grantable.
   const systemDirectory = process.platform === "win32" ? process.env.SystemRoot : "/etc";
   if (process.platform !== "win32") {
     const systemLink = path.join(base, "system-link");
     fs.symlinkSync("/etc", systemLink, "dir");
-    assert.throws(
-      () => canonicalizeAllowedFileRoot(systemLink),
-      (error) => error instanceof AllowedRootError && error.code === "UNSAFE_ROOT",
-    );
+    assert.equal(canonicalizeAllowedFileRoot(systemLink), fs.realpathSync.native("/etc"));
+  }
+
+  for (const allowed of [os.homedir(), systemDirectory]) {
+    if (!allowed || !fs.existsSync(allowed)) continue;
+    assert.equal(typeof canonicalizeAllowedFileRoot(allowed), "string");
   }
 
   for (const [candidate, code] of [
     [path.parse(os.homedir()).root, "UNSAFE_ROOT"],
-    [os.homedir(), "UNSAFE_ROOT"],
-    [systemDirectory, "UNSAFE_ROOT"],
     [file, "NOT_DIRECTORY"],
   ]) {
     if (!candidate || !fs.existsSync(candidate)) continue;

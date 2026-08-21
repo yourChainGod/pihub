@@ -1,3 +1,4 @@
+import { gzipSync } from "node:zlib";
 import { getTrustedPihubRequestContext, type TrustedPihubRequestContext } from "./pihub-auth";
 import { pihubNoStoreHeaders } from "./pihub-auth-http";
 import type { PihubCapability } from "./pihub-auth-shared";
@@ -55,9 +56,23 @@ export function requireOwnedSession(
   return access;
 }
 
+const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
+// Tailscale Serve (Go httputil.ReverseProxy) strips the client's
+// Accept-Encoding before forwarding, so Next's own compression never engages
+// on the only path desktop clients use. Session payloads run to hundreds of
+// KB over slow DERP relays, so encode large bodies ourselves — the proxy
+// forwards an already-gzipped body untouched, and reqwest/browsers decode it
+// transparently from the content-encoding header.
+const GZIP_MIN_BYTES = 1024;
+
 export function privateSessionJson(body: unknown, init: ResponseInit = {}): Response {
-  return Response.json(body, {
-    ...init,
-    headers: pihubNoStoreHeaders(init.headers),
-  });
+  const headers = pihubNoStoreHeaders(init.headers);
+  if (!headers.has("content-type")) headers.set("content-type", JSON_CONTENT_TYPE);
+  const bytes = Buffer.from(JSON.stringify(body), "utf8");
+  if (bytes.length < GZIP_MIN_BYTES) {
+    return new Response(bytes, { ...init, headers });
+  }
+  const compressed = gzipSync(bytes);
+  headers.set("content-encoding", "gzip");
+  return new Response(new Uint8Array(compressed), { ...init, headers });
 }

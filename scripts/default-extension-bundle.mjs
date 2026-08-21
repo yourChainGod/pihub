@@ -5,15 +5,17 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import { verifyServerLock } from "./verify-server-lock.mjs";
-import { prepareSecureNpmEnvironment } from "./secure-npm-environment.mjs";
+import { npmSpawnInvocation, prepareSecureNpmEnvironment } from "./secure-npm-environment.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 
 export const DEFAULT_EXTENSION_SOURCE_DIRECTORY = path.join(repositoryRoot, "extensions");
 export const DEFAULT_EXTENSION_NOTICE_FILE = "THIRD_PARTY_NOTICES.extensions.txt";
 export const DEFAULT_EXTENSION_INVENTORY_SCHEMA_VERSION = 1;
-export const DEFAULT_EXTENSION_LOCK_SHA256 = "fd91e25f2d4f3219701032d9aec6ef6f7f2496c3a0f3bfb22b7371c90ee3962c";
+export const DEFAULT_EXTENSION_LOCK_SHA256 = "7180bd9132d0f8cba90c70bb3c998b94731396f3deff9b70c047773fbcf40683";
 export const DEFAULT_EXTENSION_PACKAGES = Object.freeze([
+  Object.freeze({ name: "@cortexkit/pi-magic-context", version: "0.38.0" }),
+  Object.freeze({ name: "pi-todo-rail", version: "0.2.3" }),
   Object.freeze({ name: "@ff-labs/pi-fff", version: "0.10.5" }),
   Object.freeze({ name: "pi-simplify", version: "0.2.3" }),
   Object.freeze({ name: "@gotgenes/pi-permission-system", version: "26.3.0" }),
@@ -21,6 +23,8 @@ export const DEFAULT_EXTENSION_PACKAGES = Object.freeze([
   Object.freeze({ name: "@gotgenes/pi-subagents", version: "19.3.2" }),
 ]);
 export const DEFAULT_EXTENSION_RESOURCE_LAYOUT = Object.freeze({
+  "@cortexkit/pi-magic-context": Object.freeze({ extensions: Object.freeze(["dist/index.js"]) }),
+  "pi-todo-rail": Object.freeze({ extensions: Object.freeze(["index.ts"]) }),
   "@ff-labs/pi-fff": Object.freeze({ extensions: Object.freeze(["src/index.ts"]) }),
   "pi-simplify": Object.freeze({ extensions: Object.freeze(["dist/index.js"]) }),
   "@gotgenes/pi-permission-system": Object.freeze({ extensions: Object.freeze(["src/index.ts"]) }),
@@ -50,6 +54,15 @@ export {
   HOST_PI_VERSION as DEFAULT_EXTENSION_HOST_PI_VERSION,
 };
 const EXPECTED_PI_PEERS = Object.freeze({
+  "@cortexkit/pi-magic-context": Object.freeze({
+    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@earendil-works/pi-tui": "^0.80.2",
+  }),
+  "pi-todo-rail": Object.freeze({
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+  }),
   "@ff-labs/pi-fff": Object.freeze({
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
@@ -74,8 +87,24 @@ const EXPECTED_PI_PEERS = Object.freeze({
     "@earendil-works/pi-tui": ">=0.75.0",
   }),
 });
+// Magic Context 0.38.0 declares the 0.80.x Pi peer range, but its published
+// extension API is backward-compatible with the audited 0.84.2 host used by
+// PiHub. Keep this narrow, version-pinned exception explicit and reviewable.
+const AUDITED_PEER_COMPATIBILITY_OVERRIDES = Object.freeze({
+  "@cortexkit/pi-magic-context": Object.freeze({
+    "@earendil-works/pi-coding-agent": new Set(["0.84.2"]),
+    "@earendil-works/pi-tui": new Set(["0.84.2"]),
+  }),
+});
 const ALLOWED_PHYSICAL_INSTALL_SCRIPTS = new Map([
   ["tree-sitter-bash", "0.25.1"],
+  // The package ships all supported native binaries. Its postinstall is never
+  // executed because staging uses --ignore-scripts; allowing the exact pin
+  // keeps the bundle self-contained without permitting a network lifecycle.
+  ["onnxruntime-node", "1.24.3"],
+  // Sharp's install check only selects its already-published platform binary;
+  // lifecycle execution remains disabled while staging.
+  ["sharp", "0.34.5"],
 ]);
 const AUDITED_PRIVACY_FINDINGS = new Map([
   [
@@ -86,10 +115,206 @@ const AUDITED_PRIVACY_FINDINGS = new Map([
     }),
   ],
   [
+    // The match is pi-magic-context's own redaction regex
+    // (`/\/Users\/[^/]+\//g -> /Users/<USER>/`), not a real user path.
+    "node_modules/@cortexkit/pi-magic-context/dist/index.js",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "b133fd5dcfef321dcbdd0808b9152ed65348041868ed34dfe0c60ce9504ad839",
+    }),
+  ],
+  // The remaining entries are upstream build-machine paths embedded in
+  // sourcemaps and native binaries (onnxruntime / quickjs); no user data.
+  [
+    "node_modules/@jitl/quickjs-singlefile-cjs-release-asyncify/dist/index.js.map",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "3bb92e2e724e9bb62b1d3dea29a944dee25c4adca3ade6304fe9f46e56c2707d",
+    }),
+  ],
+  [
+    "node_modules/onnxruntime-node/bin/napi-v6/darwin/arm64/libonnxruntime.1.24.3.dylib",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "76831409ce6eded92b4cb343cf422c458a60c1ea1d5f3cfa69692ab7fcc67f0f",
+    }),
+  ],
+  [
+    "node_modules/onnxruntime-node/bin/napi-v6/darwin/arm64/onnxruntime_binding.node",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "ffa33e57e56799a89ff4986ae579ca0de0be81867c5e3219ac9fdb0f7d1bbd89",
+    }),
+  ],
+  [
+    "node_modules/onnxruntime-web/dist/ort.all.bundle.min.mjs.map",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "9e28dafe0b543ac196289b2ea17adfea882c8da9785210ec03befd23f93eb148",
+    }),
+  ],
+  [
+    "node_modules/onnxruntime-web/dist/ort.bundle.min.mjs.map",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "021e478c265610e90df70140f9ef7f9aa7ebc31e9fb4de1e116106200966c1cd",
+    }),
+  ],
+  [
+    "node_modules/onnxruntime-web/dist/ort.jspi.bundle.min.mjs.map",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "c0edd24b06adb1d2f7ec54dcaff3c3d4befaecd5110e5b8a2ba7032de6eb6ed6",
+    }),
+  ],
+  [
+    "node_modules/onnxruntime-web/dist/ort.wasm.bundle.min.mjs.map",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "fdedcaffabc56b2add8d23e72faf5adc72cda9667eda6b621e162cacbe53f9d0",
+    }),
+  ],
+  [
+    "node_modules/onnxruntime-web/dist/ort.webgpu.bundle.min.mjs.map",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "5250a487fcbc2f2cba84cd4d5b0c8e7bebf34ce0969863389e3ef1274d53f341",
+    }),
+  ],
+  [
     "node_modules/zod/src/v4/mini/tests/string.test.ts",
     Object.freeze({
       rules: new Set(["jwt"]),
       sha256: "efb9ef22f2179e700a2033edd4e1e03a6fe4f6b95fa4bc0bd29223065e1ec0a0",
+    }),
+  ],
+  // win32 staged tree (first Windows release build): native binaries embed
+  // upstream CI build paths; AWS SDK type docs and @types/node contain
+  // documented example patterns (placeholder keys/secrets, not real data).
+  [
+    "node_modules/@aws-sdk/nested-clients/dist-types/submodules/sso-oidc/commands/CreateTokenCommand.d.ts",
+    Object.freeze({
+      rules: new Set(["generic-secret"]),
+      sha256: "8fe8f076a7acd3ce108c090daff013c07dfe23fe89113408caa789f7c7fcedb5",
+    }),
+  ],
+  [
+    "node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleCommand.d.ts",
+    Object.freeze({
+      rules: new Set(["aws-access-key"]),
+      sha256: "85d68f3dbf85b1bb5c6070799c79112252c457189eff62b83c85649e36c6406a",
+    }),
+  ],
+  [
+    "node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleWithWebIdentityCommand.d.ts",
+    Object.freeze({
+      rules: new Set(["aws-access-key"]),
+      sha256: "a5dc443adbff96a09d32f4829f694bebee4194cf30949aaf63a1cc1d977334f2",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/CHANGELOG.md",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "7e9e91204ee1f002052070a90332d24a166e0cbc433095cebe4136651e8d91c8",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/examples/extensions/overlay-qa-tests.ts",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "4b1778e9e247c9eb24fe48e13fff0272f6f78b8102b4ed085d03598c3b98773f",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/nested-clients/dist-types/submodules/sso-oidc/commands/CreateTokenCommand.d.ts",
+    Object.freeze({
+      rules: new Set(["generic-secret"]),
+      sha256: "3ad424e44a64663b5e74e2a9184cabffbae4b267dfc10b64b45408a3558d3e4c",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleCommand.d.ts",
+    Object.freeze({
+      rules: new Set(["aws-access-key"]),
+      sha256: "984324c6cd5584aa5cbde353d2b7394d96cfa5f658b0f62bab10ef7154163dd0",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@aws-sdk/nested-clients/dist-types/submodules/sts/commands/AssumeRoleWithWebIdentityCommand.d.ts",
+    Object.freeze({
+      rules: new Set(["aws-access-key"]),
+      sha256: "ce324928c5245ce3f8522f2fd3e00fd6e8ee8c477188515d9c1571fdb5b0a1b8",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard/src/clipboard_rs/platform/x11.rs",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "5e44069a1a9e5b04f2ea82805965efb1a48dc900f8fbddb47665f915f1575cb8",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@mariozechner/clipboard-win32-x64-msvc/clipboard.win32-x64-msvc.node",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "2b75a71676a9054323a223c7853570fa44bf73a701d6c3160219ec0971052fd5",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "10468181565c56004c867f3a4af96f89a0ef5a63a72f2b5fb12c1f1992a3615c",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node/fs.d.ts",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "c906fb15bd2aabc9ed1e3f44eb6a8661199d6c320b3aa196b826121552cb3695",
+    }),
+  ],
+  [
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node/process.d.ts",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "bceb58df66ab8fb00170df20cd813978c5ab84be1d285710c4eb005d8e9d8efb",
+    }),
+  ],
+  [
+    "node_modules/@ff-labs/fff-bin-win32-x64/fff_c.dll",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "109f968f5cea7fad106ae42018b152bc9317efa74e14809c44a3bb39de18962f",
+    }),
+  ],
+  [
+    "node_modules/@types/node/fs.d.ts",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "6d81823c5704398a68b98e3c7a459334fc0403ad5e6953f4317b5b4919e289e4",
+    }),
+  ],
+  [
+    "node_modules/@types/node/process.d.ts",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "1c16d778cc142455f35a3f1a411227b9901c671756338af12a9175958500ce66",
+    }),
+  ],
+  [
+    "node_modules/@yuuang/ffi-rs-win32-ia32-msvc/ffi-rs.win32-ia32-msvc.node",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "86aba53b5636ab4e84b23201d429deac03bca74432d19fc2bd920f908cf9ded5",
+    }),
+  ],
+  [
+    "node_modules/@yuuang/ffi-rs-win32-x64-msvc/ffi-rs.win32-x64-msvc.node",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "2cb551f9b5745e7a36c67806562e5b6d0d74513a3c91eafa7a654d69b461aaaf",
     }),
   ],
 ]);
@@ -476,8 +701,12 @@ function verifyDirectPackage(root, lock, extension, hostVersions) {
   if (!exactStringMap(actualPeers, expectedPeers)) {
     throw new Error(`Default extension Pi peer contract changed: ${extension.name}`);
   }
+  if (extension.name === "pi-todo-rail" && metadata.peerDependencies?.typebox !== "*") {
+    throw new Error("pi-todo-rail must pin its typebox peer contract");
+  }
   for (const [name, range] of Object.entries(expectedPeers)) {
-    if (!satisfiesSupportedRange(hostVersions[name], range)) {
+    const override = AUDITED_PEER_COMPATIBILITY_OVERRIDES[extension.name]?.[name];
+    if (!satisfiesSupportedRange(hostVersions[name], range) && !override?.has(hostVersions[name])) {
       throw new Error(`${extension.name} does not support host ${name}@${hostVersions[name]}`);
     }
   }
@@ -661,11 +890,11 @@ export function createDefaultExtensionNotices(verification) {
 }
 
 function runNpm(run, args, cwd) {
-  const prepared = prepareSecureNpmEnvironment("pihub-extension-npm-");
+  const prepared = prepareSecureNpmEnvironment("pihub-extension-npm-", { legacyPeerDeps: true });
   try {
     if (run) return run(args, cwd, 128 * 1024 * 1024, { env: prepared.environment });
-    const command = process.platform === "win32" ? "npm.cmd" : "npm";
-    const result = spawnSync(command, args, {
+    const invocation = npmSpawnInvocation(args);
+    const result = spawnSync(invocation.command, invocation.args, {
       cwd,
       encoding: "utf8",
       env: prepared.environment,
@@ -688,7 +917,7 @@ export function installDefaultExtensionDependencies(run, cwd) {
     "--omit=peer",
     "--engine-strict=true",
     "--no-bin-links",
-    "--legacy-peer-deps=false",
+    "--legacy-peer-deps=true",
     "--force=false",
     "--no-audit",
     "--no-fund",

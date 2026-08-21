@@ -20,9 +20,9 @@
 | 4 | 品牌图标 | `PARTIAL` | `scripts/verify-icon-assets.mjs` 与脚本测试验证 π 源图和平台资产生成 | 在最终 macOS、Windows、Linux 安装产物及 Dock/任务栏/启动器中人工核验全部尺寸 |
 | 5 | 跨平台 Server | `BLOCKED` | 安装器、service lifecycle、路径、Windows PowerShell、systemd 和 launchd 单元测试 | 必须在 macOS/Windows/Linux 的 arm64/x64 原生 runner 完成安装、升级、状态、修复、日志、卸载、回滚和开机自启验证 |
 | 6 | 安全与隐私 | `PARTIAL` | Server 鉴权、nonce、设备隔离、文件/Git/PTY、SSRF、凭据最小环境、插件 opaque handle 和更新验签测试；filesystem 隐私扫描 `0/0`；两份生产依赖 audit 为 `0 vulnerabilities` | 在最终 Git 历史和所有附件上执行 privacy、Gitleaks、SBOM、provenance、CodeQL 与平台原生文件系统验证；`SECURITY.md` 所列 TOCTOU/mount 风险仍是发布门禁 |
-| 7 | 测试与质量门 | `PARTIAL` | 根与 Server lint/typecheck/build 局部门禁通过；Server 全量 `797/797`；发布脚本 `88/88`、零 skip；根 unit `3/3` | clean Server production build、全套 Playwright、Rust fmt/clippy/test、六平台 release smoke 必须在最终提交重新执行 |
+| 7 | 测试与质量门 | `PARTIAL` | 根与 Server lint/typecheck/build 局部门禁通过；Server 全量 `801/801`；发布脚本 `89/89`、零 skip；根 unit `3/3` | clean Server production build、全套 Playwright、Rust fmt/clippy/test、六平台 release smoke 必须在最终提交重新执行 |
 | 8 | 版本、文档与发布 | `PARTIAL` | `scripts/check-release-config.mjs` 确认 Desktop/Server 均为 `0.0.1`；中文 `README.md`、`SECURITY.md`、隐私和发布文档存在 | 对最终安装包、内嵌 Server、SBOM、manifest、NOTICE 和第三方许可再次核验版本与内容 |
-| 9 | GitHub 交付 | `BLOCKED` | 初始化前 filesystem 扫描：492 个文件，`0 error / 0 warning` | 当前工作区尚无最终 Git 历史；目标仓库、main 保护、安全功能、不可变 `v0.0.1` tag 和 Release 尚未形成或尚无可验证证据 |
+| 9 | GitHub 交付 | `BLOCKED` | 当前 tracked tree 隐私扫描：495 个文件，`0 error / 0 warning` | 当前工作区尚无最终 Git 历史；目标仓库、main 保护、安全功能、不可变 `v0.0.1` tag 和 Release 尚未形成或尚无可验证证据 |
 | 10 | GitHub 更新闭环 | `BLOCKED` | Desktop 和 Server 的固定仓库、固定公钥、签名 manifest、hash、平台/架构、原子切换和回滚逻辑有单元测试 | 必须用最终 GitHub Release 资产完成 Desktop 与 Server 的真实检查、下载、验签、候选健康检查、切换、重启恢复和回滚演练 |
 
 ## 安全不变量

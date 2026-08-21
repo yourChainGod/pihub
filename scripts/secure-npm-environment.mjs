@@ -6,10 +6,26 @@ import { createPortableBuildEnvironment } from "./build-portable-server.mjs";
 
 const NPM_REGISTRY = "https://registry.npmjs.org/";
 
+/**
+ * Command + argv for running npm with the current Node runtime. Since the
+ * CVE-2024-27980 mitigation, Node refuses to spawn `.cmd` shims without a
+ * shell, so on Windows npm must be invoked through its CLI entry script
+ * instead of the `npm.cmd` shim next to node.exe.
+ */
+export function npmSpawnInvocation(args, {
+  execPath = process.execPath,
+  platform = process.platform,
+} = {}) {
+  if (platform !== "win32") return { command: "npm", args };
+  const npmCli = path.win32.join(path.win32.dirname(execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  return { command: execPath, args: [npmCli, ...args] };
+}
+
 export function createSecureNpmEnvironment(isolationRoot, {
   execPath = process.execPath,
   platform = process.platform,
   sourceEnvironment = process.env,
+  legacyPeerDeps = false,
 } = {}) {
   const root = path.resolve(isolationRoot);
   const environment = createPortableBuildEnvironment(root, {
@@ -28,7 +44,7 @@ export function createSecureNpmEnvironment(isolationRoot, {
     NPM_CONFIG_FUND: "false",
     NPM_CONFIG_GLOBALCONFIG: path.join(root, "global.npmrc"),
     NPM_CONFIG_IGNORE_SCRIPTS: "true",
-    NPM_CONFIG_LEGACY_PEER_DEPS: "false",
+    NPM_CONFIG_LEGACY_PEER_DEPS: legacyPeerDeps ? "true" : "false",
     NPM_CONFIG_PROVENANCE: "false",
     NPM_CONFIG_REGISTRY: NPM_REGISTRY,
     NPM_CONFIG_STRICT_SSL: "true",

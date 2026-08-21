@@ -95,7 +95,12 @@ function loadDefaultExtensionProvisioner(packageRoot) {
 
 async function provisionSignedDefaultExtensions(packageRoot, options) {
   const provision = loadDefaultExtensionProvisioner(packageRoot);
-  return provision(packageRoot, { environment: options.environment });
+  return provision(packageRoot, {
+    environment: options.environment,
+    expectedPackages: options.expectedPackages,
+    selectedPackages: options.selectedPackages,
+    home: options.home,
+  });
 }
 
 async function reserveLoopbackPort() {
@@ -198,6 +203,9 @@ class StableServerSupervisor {
     this.baseRuntimeEnvironment = createServerRuntimeEnvironment(options.baseRuntimeEnvironment ?? process.env);
     this.runtimeFactory = options.runtimeFactory;
     this.defaultExtensionsEnabled = options.defaultExtensionsEnabled === true;
+    this.selectedDefaultExtensions = Array.isArray(options.selectedDefaultExtensions)
+      ? options.selectedDefaultExtensions
+      : undefined;
     this.extensionProvisioner = options.extensionProvisioner || provisionSignedDefaultExtensions;
     this.spawnImpl = options.spawnImpl || spawn;
     this.fetchImpl = options.fetchImpl || globalThis.fetch;
@@ -320,13 +328,29 @@ class StableServerSupervisor {
 
   async provisionCurrentExtensions(packageRoot) {
     if (!this.defaultExtensionsEnabled) return null;
-    const result = await this.extensionProvisioner(packageRoot, {
-      environment: this.baseRuntimeEnvironment,
-    });
+    const provisionOptions = { environment: this.baseRuntimeEnvironment };
+    if (this.selectedDefaultExtensions !== undefined) {
+      provisionOptions.selectedPackages = this.selectedDefaultExtensions;
+    }
+    const result = await this.extensionProvisioner(packageRoot, provisionOptions);
+    const selectedNames = this.selectedDefaultExtensions === undefined
+      ? null
+      : new Set(this.selectedDefaultExtensions.map((entry) => entry.name));
+    const statusPackages = Array.isArray(result?.status?.packages) ? result.status.packages : [];
+    const selectedInstalled = selectedNames === null
+      ? 0
+      : statusPackages.filter((entry) => selectedNames.has(entry?.name) && entry?.installed === true).length;
+    const unselectedEnabled = selectedNames === null
+      ? false
+      : statusPackages.some((entry) => !selectedNames.has(entry?.name) && entry?.installed === true);
+    const statusValid = selectedNames === null
+      ? result?.status?.installed === true && result?.status?.installedCount === result?.status?.total
+      : result?.status?.installedCount === this.selectedDefaultExtensions.length
+        && selectedInstalled === this.selectedDefaultExtensions.length
+        && !unselectedEnabled;
     if (!isRecord(result) || typeof result.rollback !== "function"
-        || !isRecord(result.status) || result.status.installed !== true
+        || !isRecord(result.status) || !statusValid
         || !Number.isSafeInteger(result.status.total) || result.status.total <= 0
-        || result.status.installedCount !== result.status.total
         || result.status.source !== "signed-release") {
       await result?.rollback?.().catch(() => undefined);
       throw new Error("PiHub Server default extensions did not pass activation verification");

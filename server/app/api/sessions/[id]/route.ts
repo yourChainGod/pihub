@@ -6,6 +6,7 @@ import {
   invalidateSessionPathCache,
   invalidateSessionListCache,
   buildSessionContext,
+  openSessionManagerCached,
 } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { projectTreeForResponse } from "@/lib/project-tree";
@@ -13,6 +14,7 @@ import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { privateSessionJson, requireOwnedSession } from "@/lib/session-access";
 import { getSessionOwner, removeSessionOwner } from "@/lib/session-ownership";
 import { deleteSessionTransaction } from "@/lib/session-repository";
+import { windowSessionContext } from "@/lib/session-window";
 
 function compactDesktopMessages<T>(messages: T[]): T[] {
   const clip = (text: string) => text.length <= 600 ? text : `${text.slice(0, 420)}\n\n… 工具结果已折叠 ${text.length - 600} 个字符 …\n\n${text.slice(-180)}`;
@@ -46,7 +48,7 @@ export async function GET(
       return privateSessionJson({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = liveRpc?.inner.sessionManager ?? SessionManager.open(resolvedPath!);
+    const sm = liveRpc?.inner.sessionManager ?? openSessionManagerCached(resolvedPath!);
     const filePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
     const entries = sm.getEntries();
     const leafId = sm.getLeafId();
@@ -55,17 +57,14 @@ export async function GET(
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
     const desktop = searchParams.has("desktop");
+    const after = searchParams.get("after");
+    const before = searchParams.get("before");
     const fullContext = buildSessionContext(entries as never, leafId, { deferThinking, deferToolResultImages });
     const requestedLimit = Number(searchParams.get("limit"));
-    const limit = Number.isInteger(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 500) : undefined;
-    const start = limit ? Math.max(0, fullContext.messages.length - limit) : 0;
-    let context = limit ? {
-      ...fullContext,
-      messages: fullContext.messages.slice(start),
-      entryIds: fullContext.entryIds.slice(start),
-      truncated: start > 0,
-      totalMessages: fullContext.messages.length,
-    } : fullContext;
+    const limit = Number.isInteger(requestedLimit) && requestedLimit > 0 ? requestedLimit : undefined;
+    // `after` catches up forward from the client's last entry; `before` pages
+    // backward for history backfill; a lost cursor resets to a full window.
+    let context = windowSessionContext(fullContext, { limit, after, before });
     if (desktop) context = { ...context, messages: compactDesktopMessages(context.messages) };
     const totalActiveMs = computeSessionTotalActiveMs(entries);
 

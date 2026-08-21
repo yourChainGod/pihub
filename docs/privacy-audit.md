@@ -23,6 +23,8 @@ PiHub 会处理以下敏感数据：
 - 错误、遥测、字体、图片和 Markdown 媒体不会绕过外联策略；
 - 私有仓库凭据或 GitHub Token 不会被嵌入客户端。
 
+扩展 bundle 构建固定使用隔离的无凭据 npm 环境和 `--ignore-scripts`。物理依赖树只允许精确审计过的 lifecycle 元数据（`tree-sitter-bash@0.25.1`、`onnxruntime-node@1.24.3`、`sharp@0.34.5`）；这些包的已发布资源随包封装，构建阶段不执行脚本、不下载二进制，lock、SRI、host Pi 版本和资源清单仍逐项校验。
+
 静态扫描不能证明依赖没有默认遥测，也不能替代运行时抓包。
 
 ## 本地扫描

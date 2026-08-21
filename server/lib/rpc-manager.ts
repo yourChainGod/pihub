@@ -6,7 +6,7 @@ import { existsSync, realpathSync, unlinkSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
-import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
+import { resolveVisibleModels, selectInitialModelScope, withMaxThinkingDefault } from "./model-scope";
 import {
   createProjectCommandBashExtension,
   createProjectCommandBashOperations,
@@ -389,14 +389,14 @@ export class AgentSessionWrapper {
       if (typeof this.inner.bindExtensions === "function") {
         const bindExtensions = this.inner.bindExtensions as (bindings: {
           uiContext?: ExtensionUiContextLike;
-          mode?: "rpc";
+          mode?: "rpc" | "tui";
           commandContextActions?: ExtensionCommandContextActionsLike;
           shutdownHandler?: () => void;
           onError?: (error: { extensionPath: string; event: string; error: string }) => void;
         }) => Promise<void>;
         await bindExtensions.call(this.inner, {
           uiContext,
-          mode: "rpc",
+          mode: "tui",
           commandContextActions: this.createExtensionCommandContextActions(),
           shutdownHandler: () => this.emit({
             type: "extension_ui_request",
@@ -413,7 +413,7 @@ export class AgentSessionWrapper {
           }),
         });
       } else {
-        this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
+        this.inner.extensionRunner.setUIContext?.(uiContext, "tui");
       }
       this.extensionsBound = true;
       this.applyForcedEmptySystemPrompt();
@@ -854,7 +854,7 @@ export class AgentSessionWrapper {
         this.syncProjectTrust();
         await this.inner.reload();
         if (typeof this.inner.bindExtensions !== "function") {
-          this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
+          this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "tui");
         }
         this.applyForcedEmptySystemPrompt();
         invalidateModelsCache();
@@ -1517,7 +1517,7 @@ export class AgentSessionWrapper {
         this.syncProjectTrust();
         await this.inner.reload({
           beforeSessionStart: () => {
-            this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
+            this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "tui");
           },
         });
         this.applyForcedEmptySystemPrompt();
@@ -1857,13 +1857,13 @@ export async function startRpcSession(
     const hasExistingMessages = sessionManager.getBranch().some((entry) => entry.type === "message");
     const initial = hasExistingMessages
       ? { scopedModels: [...scope.scopedModels] }
-      : selectInitialModelScope(scope, {
+      : withMaxThinkingDefault(selectInitialModelScope(scope, {
         ...(initialModel ? { requestedModel: initialModel } : {}),
         ...(defaultProvider && defaultModelId
           ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
           : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
-      });
+      }));
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,

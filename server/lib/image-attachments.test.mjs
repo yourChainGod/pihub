@@ -22,6 +22,6 @@ test("rejects invalid, oversized, and too many image attachments", async () => {
 
   assert.equal(validateAgentImages([image]), null);
   assert.match(validateAgentImages([{ ...image, mimeType: "text/plain" }]), /valid base64 image/);
-  assert.match(validateAgentImages([{ ...image, data: oversizedData }]), /10MB/);
+  assert.match(validateAgentImages([{ ...image, data: oversizedData }]), /25MB/);
   assert.match(validateAgentImages(Array.from({ length: MAX_ATTACHED_IMAGES + 1 }, () => image)), /at most/);
 });

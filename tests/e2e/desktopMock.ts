@@ -2,17 +2,20 @@ import type { Page } from "@playwright/test";
 
 export interface DesktopMockOptions {
   desktopUpdateScenario?: "available" | "none" | "signature-failure";
+  localUpdateScenario?: "available" | "missing" | "none";
   pairingFailure?: "invalid-once" | "network-once" | "rate-limit";
   remoteDelayMs?: number;
   remoteFailure?: "offline" | "offline-once";
   resourceFailure?: "managed" | "plugin-once" | "read-once" | "trust-once";
   resourceTrust?: "forbidden" | "trusted" | "untrusted";
+  serverOs?: "darwin" | "linux" | "win32";
+  staleComponent?: "pi" | "plugin";
   terminalFailure?: "create" | "read";
   updateScenario?: "apply-failure" | "available" | "busy" | "failed" | "none" | "signature-failure" | "unsupported";
 }
 
 export async function installDesktopMock(page: Page, options: DesktopMockOptions = {}): Promise<void> {
-  await page.addInitScript(({ desktopUpdateScenario = "none", pairingFailure, remoteDelayMs = 0, remoteFailure, resourceFailure, resourceTrust = "trusted", terminalFailure, updateScenario = "none" }) => {
+  await page.addInitScript(({ desktopUpdateScenario = "none", localUpdateScenario = "available", pairingFailure, remoteDelayMs = 0, remoteFailure, resourceFailure, resourceTrust = "trusted", serverOs = "darwin", staleComponent, terminalFailure, updateScenario = "none" }) => {
     const now = new Date().toISOString();
     const devices = [
       { id: "alpha", name: "Studio Mac", host: "studio.tailnet.ts.net", url: "https://studio.tailnet.ts.net:30141", source: "tailscale", favorite: true, accent: "#fa6f46", os: "macos" },
@@ -21,7 +24,7 @@ export async function installDesktopMock(page: Page, options: DesktopMockOptions
     ];
     const sessions = [
       { id: "session-1", cwd: "/projects/pihub", name: "项目规划", created: now, modified: now, messageCount: 2, firstMessage: "规划 PiHub", projectRoot: "/projects/pihub", projectKey: "pihub" },
-      { id: "session-2", cwd: "/projects/pihub-worktrees/feature-e2e", name: "实现记录", created: now, modified: now, messageCount: 2, firstMessage: "实现桌面端", projectRoot: "/projects/pihub", projectKey: "pihub", worktreeBranch: "feature/e2e" },
+      { id: "session-2", cwd: "/projects/pihub-worktrees/feature-e2e", name: "实现记录", created: now, modified: now, messageCount: 2, firstMessage: "实现桌面端", projectRoot: "/projects/pihub", projectKey: "pihub", worktreeBranch: "feature/e2e", interrupted: true },
     ];
     const details: Record<string, unknown> = {
       "session-1": {
@@ -58,6 +61,7 @@ export async function installDesktopMock(page: Page, options: DesktopMockOptions
       },
     };
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const AUTO_PAIR_CODE = `pihub-${"A".repeat(43)}`;
     const listeners = new Map<string, Set<(payload: unknown) => void>>();
     const credentials = new Set(["https://studio.tailnet.ts.net:30141"]);
     const runningSessionIds = new Set<string>();
@@ -66,6 +70,7 @@ export async function installDesktopMock(page: Page, options: DesktopMockOptions
       ["/projects/pihub/README.md", { content: "# PiHub\n\nBrowser mock file.", language: "markdown" }],
       ["/projects/pihub/src/App.tsx", { content: "export default function App() { return null; }\n", language: "typescript" }],
     ]);
+    const chunkUploads = new Map<string, Map<string, string>>();
     let modelsConfig: Record<string, unknown> = { providers: { openai: { baseUrl: "https://api.openai.com" } } };
     let newApiConfig = { providers: [] as Array<{ name: string; baseUrl: string; authenticated: boolean; overrideCount: number }>, settings: { sendSessionAffinityHeaders: true } };
     let worktrees = [
@@ -310,7 +315,19 @@ export async function installDesktopMock(page: Page, options: DesktopMockOptions
       }
       if (sessionMatch && path.includes("/auto-name")) return { title: "自动生成标题" };
       if (sessionMatch && path.includes("/thinking")) return { thinking: "测试思考内容" };
-      if (sessionMatch) return clone(details[decodeURIComponent(sessionMatch[1])] ?? null);
+      if (sessionMatch && method === "GET") {
+        const detail = details[decodeURIComponent(sessionMatch[1])] ?? null;
+        if (!detail) return null;
+        const after = new URL(path, "https://mock.invalid").searchParams.get("after");
+        const context = (detail as { context?: { messages?: unknown[]; entryIds?: string[] } }).context;
+        if (after && context?.entryIds) {
+          const anchor = context.entryIds.lastIndexOf(after);
+          if (anchor < 0) return clone({ ...detail, context: { ...context, reset: true } });
+          const total = context.messages?.length ?? 0;
+          return clone({ ...detail, context: { ...context, messages: (context.messages ?? []).slice(anchor + 1), entryIds: context.entryIds.slice(anchor + 1), truncated: false, totalMessages: total, incremental: true } });
+        }
+        return clone(detail);
+      }
       if (/^\/api\/agent\/running/.test(path)) return { runningSessionIds: [...runningSessionIds] };
       const agentMatch = path.match(/^\/api\/agent\/([^/?]+)$/);
       if (agentMatch && method === "GET") {
@@ -442,21 +459,33 @@ export async function installDesktopMock(page: Page, options: DesktopMockOptions
         return clone(newApiConfig);
       }
       if (path === "/api/pihub/setup") return {
-        platform: { os: "darwin", remoteAccess: "tailscale-ssh", openSshRunning: true, terminalBackend: "pty", preferredShell: "zsh" },
+        platform: { os: serverOs, remoteAccess: serverOs === "win32" ? "openssh" : "tailscale-ssh", openSshRunning: true, terminalBackend: serverOs === "win32" ? "ConPTY" : "pty", preferredShell: serverOs === "win32" ? "PowerShell 7" : "zsh" },
         tailscale: { installed: true, connected: true, dnsName: "studio.tailnet.ts.net", sshEnabled: true, serveEnabled: true, serveUrl: "https://studio.tailnet.ts.net" },
-        pi: { installed: true },
+        pi: { installed: true, version: staleComponent === "pi" ? "0.83.0" : "0.84.2" },
         defaultExtensions: {
           installed: true,
-          installedCount: 5,
-          total: 5,
+          installedCount: 7,
+          total: 7,
           source: "signed-release",
           packages: [
-            { name: "@ff-labs/pi-fff", version: "0.10.5", installed: true },
-            { name: "pi-simplify", version: "0.2.3", installed: true },
-            { name: "@gotgenes/pi-permission-system", version: "26.3.0", installed: true },
-            { name: "@eko24ive/pi-ask", version: "1.2.0", installed: true },
-            { name: "@gotgenes/pi-subagents", version: "19.3.2", installed: true },
+            { name: "@cortexkit/pi-magic-context", version: "0.38.0", installed: true, installedVersion: "0.38.0" },
+            { name: "pi-todo-rail", version: "0.2.3", installed: true, installedVersion: staleComponent === "plugin" ? "0.2.0" : "0.2.3" },
+            { name: "@ff-labs/pi-fff", version: "0.10.5", installed: true, installedVersion: "0.10.5" },
+            { name: "pi-simplify", version: "0.2.3", installed: true, installedVersion: "0.2.3" },
+            { name: "@gotgenes/pi-permission-system", version: "26.3.0", installed: true, installedVersion: "26.3.0" },
+            { name: "@eko24ive/pi-ask", version: "1.2.0", installed: true, installedVersion: "1.2.0" },
+            { name: "@gotgenes/pi-subagents", version: "19.3.2", installed: true, installedVersion: "19.3.2" },
           ],
+          magicContext: {
+            installed: true,
+            configured: true,
+            todoEnabled: false,
+            todoOverlay: false,
+            compactionEnabled: true,
+            agentsManaged: true,
+            version: "0.38.0",
+            source: "signed-release",
+          },
         },
         server: { installed: true, packageName: "pihub-server", version: serverVersion, running: true },
         installPlan: [],
@@ -611,6 +640,11 @@ export async function installDesktopMock(page: Page, options: DesktopMockOptions
         if (command === "agegr_request") return agegrRequest(args);
         if (command === "start_agent_stream") return ++streamGeneration;
         if (command === "stop_agent_stream" || command === "open_device") return undefined;
+        if (command === "start_terminal_stream") {
+          if (terminalFailure === "read") throw new Error("terminal stream unavailable");
+          return ++streamGeneration;
+        }
+        if (command === "stop_terminal_stream") return undefined;
         if (command === "upload_remote_files") {
           const directory = remoteFilePath(String(args.path ?? ""));
           const payload = Array.isArray(args.files) ? args.files as Array<{ name?: unknown; data?: unknown }> : [];
@@ -623,10 +657,92 @@ export async function installDesktopMock(page: Page, options: DesktopMockOptions
           }
           return { uploaded, skipped: [], errors: [] };
         }
+        if (command === "upload_remote_chunk") {
+          const uploadId = String(args.uploadId ?? "");
+          const name = String(args.name ?? "");
+          const binary = atob(String(args.data ?? ""));
+          const staging = chunkUploads.get(uploadId) ?? new Map<string, string>();
+          staging.set(name, (staging.get(name) ?? "") + binary);
+          chunkUploads.set(uploadId, staging);
+          return undefined;
+        }
+        if (command === "upload_remote_commit") {
+          const directory = remoteFilePath(String(args.path ?? ""));
+          const staging = chunkUploads.get(String(args.uploadId ?? ""));
+          const names = Array.isArray(args.names) ? args.names.map(String) : [];
+          const uploaded: string[] = [];
+          for (const name of names) {
+            const binary = staging?.get(name);
+            if (binary === undefined) throw new Error(`missing staged chunk data for ${name}`);
+            files.set(normalizePath(`${directory}/${name}`), { content: binary, language: "text" });
+            uploaded.push(name);
+          }
+          chunkUploads.delete(String(args.uploadId ?? ""));
+          return { uploaded, skipped: [], errors: [] };
+        }
+        if (command === "upload_remote_abort") {
+          chunkUploads.delete(String(args.uploadId ?? ""));
+          return undefined;
+        }
         if (command === "download_remote_file") return { path: `/Users/example/Downloads/${String(args.name ?? "download.bin")}` };
-        if (command === "bootstrap_tailnet_peer") return { success: true, output: "已安装签名版 PiHub Server", installed: true, requiresApproval: false };
+        if (command === "bootstrap_tailnet_peer") {
+          if (args.autoPair === true) {
+            emit("pihub-bootstrap-log", { stream: "stdout", line: "[pihub] 安装完成" });
+            emit("pihub-bootstrap-log", { stream: "stdout", line: `PIHUB_PAIRING_CODE=${AUTO_PAIR_CODE}` });
+            return { success: true, output: `已安装签名版 PiHub Server\nPIHUB_PAIRING_CODE=${AUTO_PAIR_CODE}`, installed: true, requiresApproval: false };
+          }
+          if (typeof args.localArchiveDir === "string" && args.localArchiveDir) {
+            emit("pihub-bootstrap-log", { stream: "stdout", line: "[pihub] 上传本地发布包并校验 SHA-256" });
+            emit("pihub-bootstrap-log", { stream: "stdout", line: "[pihub] 直传安装完成" });
+            serverVersion = "0.0.2";
+            staleComponent = undefined;
+            return { success: true, output: "[pihub] 直传安装完成\nPIHUB_SERVER_INSTALLED\nPIHUB_BOOTSTRAP_OK", installed: true, requiresApproval: false };
+          }
+          return { success: true, output: "已安装签名版 PiHub Server", installed: true, requiresApproval: false };
+        }
+        if (command === "check_local_server_update") {
+          const platform = String(args.platform ?? "");
+          if (platform === "win32" || platform === "windows") throw new Error("Windows 目标暂不支持直传更新");
+          if (platform !== "linux" && platform !== "darwin") throw new Error(`本地直传不支持目标平台：${platform}`);
+          if (localUpdateScenario === "missing") throw new Error(`本地发布包目录中没有匹配 ${platform} 平台的发布包`);
+          const current = typeof args.currentVersion === "string" ? args.currentVersion : "";
+          const latest = localUpdateScenario === "none" ? current || serverVersion : "0.0.2";
+          return {
+            latest,
+            archiveName: `pihub-server-${latest}-${platform}-x64.tar.gz`,
+            updateAvailable: Boolean(latest) && latest !== current,
+            pi: { name: "@earendil-works/pi-coding-agent", version: "0.84.2" },
+            extensions: [
+              { name: "@cortexkit/pi-magic-context", version: "0.38.0" },
+              { name: "pi-todo-rail", version: "0.2.3" },
+              { name: "@ff-labs/pi-fff", version: "0.10.5" },
+              { name: "pi-simplify", version: "0.2.3" },
+              { name: "@gotgenes/pi-permission-system", version: "26.3.0" },
+              { name: "@eko24ive/pi-ask", version: "1.2.0" },
+              { name: "@gotgenes/pi-subagents", version: "19.3.2" },
+            ],
+          };
+        }
         if (command === "open_tailscale_approval") return undefined;
         if (command === "bundled_versions") return { pihubServer: "0.0.1", app: "0.0.1" };
+        // Session cache mock: backed by localStorage so it survives page.reload()
+        // (the real desktop command writes per-device folders on disk).
+        if (command === "read_session_cache") return localStorage.getItem(`pihub-mock-session-cache:${String(args.deviceId)}:${String(args.sessionId)}`);
+        if (command === "write_session_cache") {
+          localStorage.setItem(`pihub-mock-session-cache:${String(args.deviceId)}:${String(args.sessionId)}`, String(args.payload ?? ""));
+          return undefined;
+        }
+        if (command === "delete_session_cache") {
+          localStorage.removeItem(`pihub-mock-session-cache:${String(args.deviceId)}:${String(args.sessionId)}`);
+          return undefined;
+        }
+        if (command === "clear_session_cache") {
+          for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+            const key = localStorage.key(index);
+            if (key?.startsWith("pihub-mock-session-cache:")) localStorage.removeItem(key);
+          }
+          return undefined;
+        }
         throw new Error(`Unmocked desktop command: ${command}`);
       },
       async listen(event: string, callback: (payload: unknown) => void): Promise<() => void> {
@@ -652,6 +768,7 @@ export async function installDesktopMock(page: Page, options: DesktopMockOptions
         emit,
         listenerCount(event: string) { return listeners.get(event)?.size ?? 0; },
         setNetwork(online: boolean) { remoteOnline = online; },
+        setRunning(ids: string[]) { runningSessionIds.clear(); for (const id of ids) runningSessionIds.add(id); },
         snapshot() {
           return {
             files: [...files.entries()],
@@ -691,6 +808,12 @@ export async function setDesktopNetwork(page: Page, online: boolean): Promise<vo
   await page.evaluate((value) => {
     (window as unknown as { __PIHUB_TEST__: { setNetwork: (next: boolean) => void } }).__PIHUB_TEST__.setNetwork(value);
   }, online);
+}
+
+export async function setDesktopRunningSessions(page: Page, ids: string[]): Promise<void> {
+  await page.evaluate((value) => {
+    (window as unknown as { __PIHUB_TEST__: { setRunning: (ids: string[]) => void } }).__PIHUB_TEST__.setRunning(value);
+  }, ids);
 }
 
 export interface DesktopMockSnapshot {

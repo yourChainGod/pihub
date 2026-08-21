@@ -2923,6 +2923,7 @@ dependencies = [
  "hmac",
  "keyring",
  "libc",
+ "memchr",
  "minisign-verify",
  "percent-encoding",
  "reqwest 0.12.28",

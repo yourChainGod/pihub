@@ -1,4 +1,4 @@
-import type { AttachedImage, Device, DeviceCredentialStatus, DeviceStatus, NewRemoteSession, RemoteAgentEventPayload, RemoteAgentState, RemoteDirectoryBrowse, RemoteDirectoryListing, RemoteFilePreview, RemoteGitDiff, RemoteGitStatus, RemoteModelsResponse, RemoteNewApiConfig, RemotePluginPackageInfo, RemotePluginsResponse, RemoteProjectTrustStatus, RemoteServerUpdateAccepted, RemoteSession, RemoteSetupStatus, RemoteSkillInfo, RemoteSkillsResponse, RemoteUpdates, RemoteWorktrees, SessionDetail, TailnetScan } from "./types.ts";
+import type { AttachedImage, Device, DeviceCredentialStatus, DeviceStatus, NewRemoteSession, RemoteAgentEventPayload, RemoteAgentState, RemoteDirectoryBrowse, RemoteDirectoryListing, RemoteFilePreview, RemoteGitDiff, RemoteGitStatus, RemoteModelsResponse, RemoteNewApiConfig, RemotePluginPackageInfo, RemotePluginsResponse, RemoteProjectTrustStatus, RemoteServerUpdateAccepted, RemoteSession, RemoteSetupStatus, RemoteSkillInfo, RemoteSkillsResponse, RemoteTerminalEventPayload, RemoteUpdates, RemoteWorktrees, SessionDetail, TailnetScan } from "./types.ts";
 import { invokeDesktop, isDesktopEnvironment, listenDesktopEvent } from "./desktopTransport.ts";
 
 const inTauri = isDesktopEnvironment;
@@ -49,9 +49,30 @@ export async function scanTailnet(port?: number, probeServices = true): Promise<
 
 export interface BootstrapResult { success: boolean; output: string; installed: boolean; requiresApproval: boolean; approvalUrl?: string }
 
-export async function bootstrapTailnetPeer(host: string, os?: string, username?: string, installDefaultExtensions = true): Promise<BootstrapResult> {
+export const DEFAULT_BOOTSTRAP_EXTENSIONS = Object.freeze([
+  Object.freeze({ name: "@cortexkit/pi-magic-context", version: "0.38.0", label: "Magic Context", description: "持久上下文与压缩记忆（todowrite 已关闭）" }),
+  Object.freeze({ name: "pi-todo-rail", version: "0.2.3", label: "Todo Rail", description: "项目待办栏与会话内任务状态" }),
+  Object.freeze({ name: "@ff-labs/pi-fff", version: "0.10.5", label: "FFF 搜索", description: "快速文件搜索工具" }),
+  Object.freeze({ name: "pi-simplify", version: "0.2.3", label: "Simplify", description: "简化常用 Pi 工作流" }),
+  Object.freeze({ name: "@gotgenes/pi-permission-system", version: "26.3.0", label: "权限系统", description: "命令与路径权限审查" }),
+  Object.freeze({ name: "@eko24ive/pi-ask", version: "1.2.0", label: "Ask User", description: "交互式确认与提问" }),
+  Object.freeze({ name: "@gotgenes/pi-subagents", version: "19.3.2", label: "Subagents", description: "受控子代理工具" }),
+] as const);
+
+export async function bootstrapTailnetPeer(host: string, os?: string, username?: string, installDefaultExtensions = true, selectedExtensions?: string[], options: { localArchiveDir?: string; autoPair?: boolean } = {}): Promise<BootstrapResult> {
   if (!inTauri()) throw new Error("请在 PiHub 客户端中使用 SSH 配置");
-  return invokeDesktop("bootstrap_tailnet_peer", { host, os, username, installDefaultExtensions });
+  return invokeDesktop("bootstrap_tailnet_peer", { host, os, username, installDefaultExtensions, selectedExtensions, localArchiveDir: options.localArchiveDir || undefined, autoPair: options.autoPair === true });
+}
+
+/** Extracts the one-time auto-pairing code from bootstrap output, if present. */
+export function bootstrapPairingCode(output: string): string | null {
+  const match = /(?:^|\n)PIHUB_PAIRING_CODE=(pihub-[A-Za-z0-9_-]{43})(?=\n|$)/.exec(output);
+  return match ? match[1] : null;
+}
+
+/** Removes pairing-code marker lines so secrets never reach the UI or logs. */
+export function scrubBootstrapSecrets(text: string): string {
+  return text.split("\n").filter((line) => !line.trimStart().startsWith("PIHUB_PAIRING_CODE=")).join("\n");
 }
 
 /** Subscribes to live remote-script output during SSH bootstrap. Returns an unsubscribe function. */
@@ -122,8 +143,9 @@ export async function loadRemoteSessions(device: Device): Promise<{ sessions: Re
   return remote(device, "/api/sessions");
 }
 
-export async function loadRemoteSession(device: Device, sessionId: string, limit = 40): Promise<SessionDetail> {
-  return remote(device, `/api/sessions/${encodeURIComponent(sessionId)}?deferThinking=1&deferMedia=1&desktop=1&limit=${limit}`);
+export async function loadRemoteSession(device: Device, sessionId: string, limit = 40, after?: string, before?: string): Promise<SessionDetail> {
+  const cursor = after ? `&after=${encodeURIComponent(after)}` : before ? `&before=${encodeURIComponent(before)}` : "";
+  return remote(device, `/api/sessions/${encodeURIComponent(sessionId)}?deferThinking=1&deferMedia=1&desktop=1&limit=${limit}${cursor}`);
 }
 
 export async function sendRemotePrompt(device: Device, sessionId: string, message: string, images?: AttachedImage[]): Promise<void> {
@@ -206,6 +228,19 @@ export async function stopRemoteAgentStream(device: Device, sessionId: string): 
   if (inTauri()) await invokeDesktop("stop_agent_stream", { url: device.url, deviceId: device.id, sessionId });
 }
 
+export function remoteTerminalEventMatchesDevice(payload: RemoteTerminalEventPayload, device: Pick<Device, "id" | "url">): boolean {
+  return payload.deviceId === device.id && payload.deviceOrigin === new URL(device.url).origin;
+}
+
+export async function startRemoteTerminalStream(device: Device, terminalId: string): Promise<number> {
+  if (!inTauri()) throw new Error("实时终端仅支持 PiHub 桌面客户端");
+  return invokeDesktop<number>("start_terminal_stream", { url: device.url, deviceId: device.id, terminalId });
+}
+
+export async function stopRemoteTerminalStream(device: Device, terminalId: string): Promise<void> {
+  if (inTauri()) await invokeDesktop("stop_terminal_stream", { url: device.url, deviceId: device.id, terminalId });
+}
+
 export async function loadRemoteModels(device: Device, cwd: string): Promise<RemoteModelsResponse> {
   return remote(device, `/api/models?cwd=${encodeURIComponent(cwd)}`);
 }
@@ -245,6 +280,12 @@ export async function loadRemoteRunning(device: Device): Promise<string[]> {
 
 export async function loadRemoteFiles(device: Device, cwd: string): Promise<string[]> {
   const result = await remote<{ files: string[] }>(device, `/api/file-index?cwd=${encodeURIComponent(cwd)}`);
+  return result.files;
+}
+
+/** Server-side fuzzy file search — used for @ mentions when the cached index is missing or truncated. */
+export async function loadRemoteFileMatches(device: Device, cwd: string, q: string): Promise<string[]> {
+  const result = await remote<{ files: string[] }>(device, `/api/file-index?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(q)}`);
   return result.files;
 }
 
@@ -338,8 +379,8 @@ export async function uploadRemoteCheck(device: Device, directory: string, fileN
   return remote(device, `/api/files/${encodedRemotePath(directory)}?type=upload-check`, "POST", { fileNames });
 }
 
-function fileToBase64(file: File): Promise<string> {
-  return file.arrayBuffer().then((buffer) => {
+function blobToBase64(blob: Blob): Promise<string> {
+  return blob.arrayBuffer().then((buffer) => {
     const bytes = new Uint8Array(buffer);
     let binary = "";
     for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
@@ -347,13 +388,27 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-/** Uploads files into a remote directory. Tauri: base64 → Rust multipart (binary-safe); browser: native FormData. */
+/** Tauri uploads stage 8MB slices via IPC so no single message carries a whole (base64-inflated) file. */
+const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/** Uploads files into a remote directory. Tauri: chunked base64 → Rust multipart (binary-safe); browser: native FormData. */
 export async function uploadRemoteFiles(device: Device, directory: string, files: File[], conflict: "error" | "overwrite" | "skip"): Promise<RemoteUploadResult> {
   const path = `/api/files/${encodedRemotePath(directory)}?type=upload&conflict=${conflict}`;
   if (inTauri()) {
-    const payload: Array<{ name: string; data: string }> = [];
-    for (const file of files) payload.push({ name: file.name, data: await fileToBase64(file) });
-    return invokeDesktop("upload_remote_files", { url: device.url, path, files: payload });
+    const uploadId = crypto.randomUUID();
+    try {
+      for (const file of files) {
+        const chunks = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK_BYTES));
+        for (let index = 0; index < chunks; index += 1) {
+          const data = await blobToBase64(file.slice(index * UPLOAD_CHUNK_BYTES, (index + 1) * UPLOAD_CHUNK_BYTES));
+          await invokeDesktop("upload_remote_chunk", { url: device.url, uploadId, name: file.name, index, data });
+        }
+      }
+      return await invokeDesktop("upload_remote_commit", { url: device.url, path, uploadId, names: files.map((file) => file.name) });
+    } catch (error) {
+      await invokeDesktop("upload_remote_abort", { uploadId }).catch(() => undefined);
+      throw error;
+    }
   }
   const form = new FormData();
   for (const file of files) form.append("files", file, file.name);
@@ -387,6 +442,34 @@ export async function resizeRemoteTerminal(device: Device, id: string, cols: num
 export async function closeRemoteTerminal(device: Device, id: string): Promise<void> { await remote(device, "/api/pihub/terminal", "POST", { action: "close", id }); }
 export async function readRemoteTerminal(device: Device, id: string, offset: number): Promise<{ chunk: string; cursor: number; reset: boolean }> { return remote(device, `/api/pihub/terminal?id=${encodeURIComponent(id)}&offset=${offset}`); }
 export async function loadRemoteSetup(device: Device): Promise<RemoteSetupStatus> { return remote(device, "/api/pihub/setup"); }
+
+/** The shared local release directory setting ("连接设置" → 本地发布包目录). */
+// Self-use build: default to this machine's release-artifacts so the updates
+// panel works out of the box; the settings field still overrides it.
+export const DEFAULT_LOCAL_RELEASE_DIR = "/Users/zhangshijie/Documents/Project/pihub/release-artifacts";
+export function localReleaseDirectory(): string {
+  return (localStorage.getItem("pihub-local-release-dir") ?? "").trim() || DEFAULT_LOCAL_RELEASE_DIR;
+}
+
+export interface LocalComponentVersion {
+  name: string;
+  version: string;
+}
+
+export interface LocalServerUpdate {
+  latest: string;
+  archiveName: string;
+  updateAvailable: boolean;
+  /** Component versions bundled in the selected archive (asset.json or compiled-in pins). */
+  pi: LocalComponentVersion;
+  extensions: LocalComponentVersion[];
+}
+
+/** Detects the newest local release asset for a platform; purely local, never touches GitHub. */
+export async function checkLocalServerUpdate(directory: string, platform: string, currentVersion?: string | null): Promise<LocalServerUpdate> {
+  if (!inTauri()) throw new Error("本地发布包检测仅在 PiHub 桌面客户端中可用");
+  return invokeDesktop("check_local_server_update", { directory, platform, currentVersion: currentVersion || undefined });
+}
 
 export async function loadRemoteUpdates(device: Device): Promise<RemoteUpdates> {
   return remote(device, "/api/pihub/updates");

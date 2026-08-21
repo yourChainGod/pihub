@@ -15,6 +15,7 @@ import { normalizeServerReleaseSbom } from "./server-release-sbom.mjs";
 import { addDefaultExtensionFixture } from "./default-extension-test-fixture.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
+const SERVER_VERSION = JSON.parse(fs.readFileSync(path.join(root, "server", "package.json"), "utf8")).version;
 const require = createRequire(import.meta.url);
 const tar = require(require.resolve("tar", { paths: [path.join(root, "server")] }));
 
@@ -23,7 +24,7 @@ async function fixture(t) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const staging = path.join(directory, "staging");
   fs.mkdirSync(path.join(staging, ".next"), { recursive: true });
-  fs.writeFileSync(path.join(staging, "package.json"), '{"name":"@pihub/server","version":"0.0.1"}\n');
+  fs.writeFileSync(path.join(staging, "package.json"), `{"name":"@pihub/server","version":"${SERVER_VERSION}"}\n`);
   fs.writeFileSync(path.join(staging, ".next", "BUILD_ID"), "portable-build\n");
   fs.writeFileSync(path.join(staging, "runtime.js"), "module.exports = 'clean';\n");
   await addDefaultExtensionFixture(staging);
@@ -111,7 +112,7 @@ test("streaming Server release scan matches every staged file by path, size, and
   const result = await verifyServerReleaseArchive(archive, { expectedInventory });
   assert.equal(result.entries, expectedInventory.files.length);
   assert.equal(result.files.length, expectedInventory.files.length);
-  assert.equal(result.extensions.packages.length, 5);
+  assert.equal(result.extensions.packages.length, 7);
   assert.equal(result.totalFileBytes, expectedInventory.totalBytes);
 
   fs.writeFileSync(path.join(staging, "runtime.js"), "module.exports = 'other';\n");
@@ -204,7 +205,7 @@ test("Server release directory binds archive, SBOM, checksum, and metadata", asy
   const { directory, staging } = await fixture(t);
   const release = path.join(directory, "release");
   fs.mkdirSync(release);
-  const base = "pihub-server-0.0.1-darwin-arm64";
+  const base = `pihub-server-${SERVER_VERSION}-darwin-arm64`;
   const archiveName = `${base}.tar.gz`;
   const archive = path.join(release, archiveName);
   const dependencyDirectory = path.join(staging, "node_modules", "fixture-dependency");
@@ -215,7 +216,7 @@ test("Server release directory binds archive, SBOM, checksum, and metadata", asy
   );
   fs.writeFileSync(path.join(staging, "package-lock.json"), `${JSON.stringify({
     name: "@pihub/server",
-    version: "0.0.1",
+    version: SERVER_VERSION,
     lockfileVersion: 3,
     requires: true,
     packages: {
@@ -232,7 +233,7 @@ test("Server release directory binds archive, SBOM, checksum, and metadata", asy
     });
   const extensionSbom = npmSbomDocument(
     "@pihub/default-extensions",
-    "0.0.1",
+    SERVER_VERSION,
     extensionPackages,
     extensionPackages.map((component) => component["bom-ref"]),
   );
@@ -246,7 +247,7 @@ test("Server release directory binds archive, SBOM, checksum, and metadata", asy
   );
   const serverSbom = npmSbomDocument(
     "@pihub/server",
-    "0.0.1",
+    SERVER_VERSION,
     [fixtureDependency],
     [fixtureDependency["bom-ref"]],
   );
@@ -258,14 +259,14 @@ test("Server release directory binds archive, SBOM, checksum, and metadata", asy
     packageName: "@pihub/server",
     platform: "darwin",
     stagingDirectory: staging,
-    version: "0.0.1",
+    version: SERVER_VERSION,
   });
   fs.writeFileSync(sbom, `${JSON.stringify(sbomDocument, null, 2)}\n`);
   fs.writeFileSync(path.join(release, `${archiveName}.sha256`), `${sha256(archive)}  ${archiveName}\n`);
   const assetManifestPath = path.join(release, `${base}.asset.json`);
   const assetManifest = {
     schemaVersion: 1,
-    version: "0.0.1",
+    version: SERVER_VERSION,
     platform: "darwin",
     arch: "arm64",
     filename: archiveName,
@@ -277,7 +278,7 @@ test("Server release directory binds archive, SBOM, checksum, and metadata", asy
   fs.writeFileSync(assetManifestPath, `${JSON.stringify(assetManifest)}\n`);
 
   const result = await verifyServerReleaseDirectory(release);
-  assert.equal(result.archive.extensions.packages.length, 5);
+  assert.equal(result.archive.extensions.packages.length, 7);
   fs.appendFileSync(sbom, "tampered\n");
   await assert.rejects(verifyServerReleaseDirectory(release), /hash does not match/);
 

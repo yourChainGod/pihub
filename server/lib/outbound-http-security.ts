@@ -12,6 +12,11 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS = 3;
+const AGENT_POOL_CONNECTIONS = 8;
+const AGENT_KEEP_ALIVE_MS = 30_000;
+const AGENT_KEEP_ALIVE_MAX_MS = 60_000;
+const AGENT_POOL_IDLE_TTL_MS = 120_000;
+const AGENT_POOL_MAX = 32;
 const MAX_URL_LENGTH = 2_048;
 const MAX_HEADER_COUNT = 64;
 const MAX_HEADER_VALUE_LENGTH = 16_384;
@@ -411,6 +416,108 @@ function pinnedLookup(addresses: LookupAddress[]) {
   };
 }
 
+interface AgentLimits {
+  connectTimeoutMs: number;
+  headersTimeoutMs: number;
+  idleTimeoutMs: number;
+  maxResponseBytes: number;
+}
+
+interface PooledAgent {
+  agent: Agent;
+  inFlight: number;
+  lastUsed: number;
+  /** Dropped from the pool but kept alive until in-flight requests drain. */
+  retired: boolean;
+}
+
+const agentPool = new Map<string, PooledAgent>();
+
+/**
+ * Reusing a dispatcher keeps DNS pinning intact: the key includes the exact
+ * validated address set, so a pooled connection can only ever point at an
+ * address that passed classifyOutboundAddress. A rebind cannot reach a cached
+ * socket, because the socket is already bound to the vetted IP.
+ */
+function agentPoolKey(url: URL, addresses: LookupAddress[], limits: AgentLimits): string {
+  const pinned = addresses.map((entry) => `${entry.family}:${entry.address}`).sort().join(",");
+  return [
+    url.origin,
+    pinned,
+    limits.connectTimeoutMs,
+    limits.headersTimeoutMs,
+    limits.idleTimeoutMs,
+    limits.maxResponseBytes,
+  ].join("|");
+}
+
+function closePooledAgent(entry: PooledAgent): void {
+  void entry.agent.close().catch(() => entry.agent.destroy());
+}
+
+function prunePooledAgents(now: number): void {
+  for (const [key, entry] of agentPool) {
+    if (entry.inFlight > 0 || now - entry.lastUsed < AGENT_POOL_IDLE_TTL_MS) continue;
+    agentPool.delete(key);
+    closePooledAgent(entry);
+  }
+  while (agentPool.size > AGENT_POOL_MAX) {
+    const idle = [...agentPool].find(([, entry]) => entry.inFlight === 0);
+    const [key, entry] = idle ?? [...agentPool][0];
+    agentPool.delete(key);
+    if (entry.inFlight === 0) closePooledAgent(entry);
+    else entry.retired = true;
+  }
+}
+
+function acquirePooledAgent(url: URL, addresses: LookupAddress[], limits: AgentLimits): PooledAgent {
+  const now = Date.now();
+  prunePooledAgents(now);
+  const key = agentPoolKey(url, addresses, limits);
+  const existing = agentPool.get(key);
+  if (existing) {
+    // Refresh LRU order.
+    agentPool.delete(key);
+    agentPool.set(key, existing);
+    existing.inFlight += 1;
+    existing.lastUsed = now;
+    return existing;
+  }
+  const entry: PooledAgent = {
+    agent: new Agent({
+      connect: { lookup: pinnedLookup(addresses) as never, timeout: limits.connectTimeoutMs },
+      maxOrigins: 1,
+      connections: AGENT_POOL_CONNECTIONS,
+      pipelining: 1,
+      keepAliveTimeout: AGENT_KEEP_ALIVE_MS,
+      keepAliveMaxTimeout: AGENT_KEEP_ALIVE_MAX_MS,
+      maxResponseSize: limits.maxResponseBytes,
+      headersTimeout: limits.headersTimeoutMs,
+      bodyTimeout: limits.idleTimeoutMs,
+    }),
+    inFlight: 1,
+    lastUsed: now,
+    retired: false,
+  };
+  agentPool.set(key, entry);
+  prunePooledAgents(now);
+  return entry;
+}
+
+function releasePooledAgent(entry: PooledAgent): void {
+  entry.inFlight = Math.max(0, entry.inFlight - 1);
+  entry.lastUsed = Date.now();
+  if (entry.retired && entry.inFlight === 0) closePooledAgent(entry);
+}
+
+/** Test-only: drop every pooled connection. */
+export function resetOutboundConnectionPool(): void {
+  for (const [key, entry] of agentPool) {
+    agentPool.delete(key);
+    closePooledAgent(entry);
+  }
+}
+
 function sanitizedResponseHeaders(input: Headers): Headers {
   const headers = new Headers(input);
   for (const name of SENSITIVE_RESPONSE_HEADER_NAMES) headers.delete(name);
@@ -574,20 +681,17 @@ export async function secureOutboundFetch(
         response = await policy.__test.transport(url, { ...init, method, body, headers, redirect: "manual", signal });
       } else {
         let disposed = false;
-        const dispatcher = new Agent({
-          connect: { lookup: pinnedLookup(addresses) as never, timeout: connectTimeoutMs },
-          maxOrigins: 1,
-          connections: 1,
-          pipelining: 1,
-          maxResponseSize: maxResponseBytes,
-          headersTimeout: headersTimeoutMs,
-          bodyTimeout: idleTimeoutMs,
+        const pooled = acquirePooledAgent(url, addresses, {
+          connectTimeoutMs,
+          headersTimeoutMs,
+          idleTimeoutMs,
+          maxResponseBytes,
         });
         dispose = () => {
           if (disposed) return;
           disposed = true;
           signal.removeEventListener("abort", dispose);
-          void dispatcher.close().catch(() => dispatcher.destroy());
+          releasePooledAgent(pooled);
         };
         signal.addEventListener("abort", dispose, { once: true });
         try {
@@ -597,7 +701,7 @@ export async function secureOutboundFetch(
             headers,
             redirect: "manual",
             signal,
-            dispatcher,
+            dispatcher: pooled.agent,
           }) as unknown as Response;
         } catch (error) {
           dispose();

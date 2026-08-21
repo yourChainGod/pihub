@@ -36,8 +36,8 @@ try {
 
   $installer = Join-Path $tmp 'pihub-standalone-bootstrap.mjs'
   [IO.File]::WriteAllBytes($installer, [Convert]::FromBase64String('__STANDALONE_BOOTSTRAP__'))
-  if ('__INSTALL_EXTENSIONS__' -eq '1') {
-    & $nodeCommand.Source $installer '--with-extensions'
+  if ('__EXTENSION_SELECTION_BASE64__' -ne '') {
+    & $nodeCommand.Source $installer ('--with-extensions=__EXTENSION_SELECTION_BASE64__')
   } else {
     & $nodeCommand.Source $installer
   }

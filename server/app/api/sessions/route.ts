@@ -23,12 +23,13 @@ export async function GET(req: Request) {
     const ownedPersistedSessions = persistedSessions.filter(
       (session) => owners.get(session.id) === access.context.deviceId,
     );
-    const sessions = await attachSessionProjectInfo(
+    const running = new Set(getRunningRpcSessionIds(access.context.deviceId));
+    const sessions = (await attachSessionProjectInfo(
       mergeSessionLists(ownedPersistedSessions, runtimeSessions),
-    );
+    )).map((session) => running.has(session.id) ? { ...session, interrupted: false } : session);
     return privateSessionJson({
       sessions,
-      runningSessionIds: getRunningRpcSessionIds(access.context.deviceId),
+      runningSessionIds: [...running],
     });
   } catch {
     return privateSessionJson({ error: "Failed to list sessions" }, { status: 500 });

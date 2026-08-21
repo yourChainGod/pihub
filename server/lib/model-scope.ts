@@ -4,7 +4,7 @@ import {
   type ModelRuntime,
   type ScopedModel,
 } from "@earendil-works/pi-coding-agent";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 
 const THINKING_LEVEL_SUFFIXES = new Set<ThinkingLevel>([
   "off",
@@ -195,4 +195,41 @@ export function selectInitialModelScope(
     ...(thinkingLevel ? { thinkingLevel } : {}),
     scopedModels: [...scope.scopedModels],
   };
+}
+
+/** Canonical ascending order; the last entry a model supports is its maximum. */
+const THINKING_LEVEL_ORDER: readonly ThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/**
+ * Strongest thinking level `model` supports, or `undefined` when the model has
+ * no thinking levels beyond "off". Ordered defensively instead of trusting the
+ * SDK's array order.
+ */
+export function maxThinkingLevel(model: Model<Api>): ThinkingLevel | undefined {
+  const supported = new Set<string>(getSupportedThinkingLevels(model));
+  for (let index = THINKING_LEVEL_ORDER.length - 1; index >= 1; index -= 1) {
+    const level = THINKING_LEVEL_ORDER[index];
+    if (supported.has(level)) return level;
+  }
+  return undefined;
+}
+
+/**
+ * New sessions default to the strongest thinking level the selected model
+ * supports. An explicit request or a scoped `:level` pin always wins. This is
+ * a session default only — callers must not feed it back into the persisted
+ * settings default.
+ */
+export function withMaxThinkingDefault(result: InitialModelScopeResult): InitialModelScopeResult {
+  if (result.thinkingLevel || !result.model) return result;
+  const level = maxThinkingLevel(result.model);
+  return level ? { ...result, thinkingLevel: level } : result;
 }

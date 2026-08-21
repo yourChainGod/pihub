@@ -11,6 +11,10 @@ import { pathToFileURL } from "node:url";
 import { createGunzip } from "node:zlib";
 
 import { scanArchiveContent, scanPaths, scanTextContent } from "./privacy-scan.mjs";
+import {
+  isAuditedServerStagingArchiveFinding,
+  isAuditedServerStagingPrivacyFinding,
+} from "./server-resource-privacy.mjs";
 import { verifyServerReleaseSbom } from "./server-release-sbom.mjs";
 import {
   createDefaultExtensionNotices,
@@ -27,15 +31,15 @@ const require = createRequire(import.meta.url);
 const tar = require(require.resolve("tar", { paths: [serverDirectory] }));
 
 export const SERVER_RELEASE_SCAN_LIMITS = Object.freeze({
-  maxArchiveBytes: 256 * 1024 * 1024,
+  maxArchiveBytes: 512 * 1024 * 1024,
   maxEntries: 50_000,
-  maxExpandedBytes: 768 * 1024 * 1024,
+  maxExpandedBytes: 2048 * 1024 * 1024,
   maxMemberBytes: 128 * 1024 * 1024,
   maxNestedArchiveBytes: 16 * 1024 * 1024,
   maxPathBytes: 1_024,
   maxPathDepth: 32,
   maxCompressionRatio: 100,
-  maxTotalFileBytes: 700 * 1024 * 1024,
+  maxTotalFileBytes: 2048 * 1024 * 1024,
 });
 
 const WINDOWS_RESERVED_STEM = /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9]|lpt[1-9])$/i;
@@ -351,11 +355,16 @@ async function scanServerReleaseArchive(archivePath, options, semanticRoot) {
   if (totalFileBytes / archiveInfo.size > limits.maxCompressionRatio) {
     throw new Error("Server release archive exceeds its compression-ratio limit");
   }
+  const archiveSha256ByPath = new Map(inventory.map((entry) => [entry.path, entry.sha256]));
   const unreviewedPrivacyFindings = [...findings.values()].filter(
     (finding) => !isAuditedDefaultExtensionPrivacyFinding(
       path.join(semanticRoot, "extensions"),
       finding,
-    ),
+    ) && !isAuditedServerStagingPrivacyFinding(semanticRoot, finding)
+      && !isAuditedServerStagingArchiveFinding(
+        finding,
+        archiveSha256ByPath.get(finding.path.replace(/^archive!/, "")),
+      ),
   );
   if (unreviewedPrivacyFindings.length > 0) {
     const [finding] = unreviewedPrivacyFindings;

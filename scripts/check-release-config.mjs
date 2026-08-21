@@ -49,7 +49,14 @@ const tauri = readJson("src-tauri/tauri.conf.json");
 const serverPackage = readJson("server/package.json");
 const serverLock = readJson("server/package-lock.json");
 const appSource = read("src/App.tsx");
-const rustSource = read("src-tauri/src/lib.rs");
+// lib.rs is split into domain modules; release constants live in
+// credentials.rs / devices.rs / setup.rs, so check the concatenated sources.
+const rustSource = [
+  "src-tauri/src/lib.rs",
+  "src-tauri/src/credentials.rs",
+  "src-tauri/src/devices.rs",
+  "src-tauri/src/setup.rs",
+].map(read).join("\n");
 const desktopUpdaterSource = read("src-tauri/src/desktop_updater.rs");
 const desktopUpdaterSecuritySource = read("src-tauri/src/desktop_updater_security.rs");
 const cargoManifest = read("src-tauri/Cargo.toml");

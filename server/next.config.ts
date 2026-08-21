@@ -14,6 +14,10 @@ try {
 const nextConfig: NextConfig = {
   generateBuildId: async () => `pihub-${version}`,
   outputFileTracingRoot: configDir,
+  // Enable gzip/deflate compression for API responses (e.g. /api/file-index).
+  // SSE routes (/api/agent/[id]/events, /api/pihub/terminal/[id]/events) set
+  // Cache-Control: no-transform, which the compression middleware respects.
+  compress: true,
   experimental: {
     // The proxy authenticates multipart metadata without cloning the upload;
     // the route independently enforces this same 101 MiB raw-wire ceiling.

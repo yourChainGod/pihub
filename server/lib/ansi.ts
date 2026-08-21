@@ -1,7 +1,11 @@
 import type { CSSProperties } from "react";
 
 const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
-const ANSI_ESCAPE_AT_START_RE = /^\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/;
+// Sticky (/y) so `visibleCharPositions` can match in place at `lastIndex` instead of
+// allocating a fresh `text.slice(i)` substring for every escape sequence. Sticky anchors
+// the match to `lastIndex`, which subsumes the `^` anchor the non-sticky variant needed.
+// `lastIndex` is mutable state, so this regex must stay private to `visibleCharPositions`.
+const ANSI_ESCAPE_AT_INDEX_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/y;
 const ANSI_SGR_RE = /\x1B\[([0-9;]*)m/g;
 const TUI_CURSOR_MARKER_RE = /\x1B_pi:c\x07/g;
 
@@ -41,7 +45,8 @@ function visibleCharPositions(text: string): Array<{ start: number; end: number;
   let i = 0;
   while (i < text.length) {
     if (text.charCodeAt(i) === 0x1b) {
-      const match = text.slice(i).match(ANSI_ESCAPE_AT_START_RE);
+      ANSI_ESCAPE_AT_INDEX_RE.lastIndex = i;
+      const match = ANSI_ESCAPE_AT_INDEX_RE.exec(text);
       if (match) {
         i += match[0].length;
         continue;
@@ -56,58 +61,69 @@ function visibleCharPositions(text: string): Array<{ start: number; end: number;
   return positions;
 }
 
-function removeVisibleCharAt(text: string, index: number): string {
-  const positions = visibleCharPositions(text);
+type VisibleCharPosition = { start: number; end: number; char: string };
+
+function removeVisibleCharAt(text: string, index: number, positions: VisibleCharPosition[]): string {
   const pos = positions[index];
   if (!pos) return text;
   return text.slice(0, pos.start) + text.slice(pos.end);
 }
 
-function firstVisibleChar(text: string): string | undefined {
-  return visibleCharPositions(text)[0]?.char;
-}
-
-function lastNonSpaceVisibleCharIndex(text: string): number {
-  const positions = visibleCharPositions(text);
+function lastNonSpaceVisibleCharIndex(positions: VisibleCharPosition[]): number {
   for (let i = positions.length - 1; i >= 0; i--) {
     if (positions[i].char.trim() !== "") return i;
   }
   return -1;
 }
 
-function trimEndVisibleSpaces(text: string): string {
-  let next = text;
-  while (true) {
-    const positions = visibleCharPositions(next);
-    const last = positions[positions.length - 1];
-    if (!last || last.char.trim() !== "") return next;
-    next = next.slice(0, last.start) + next.slice(last.end);
+function trimEndVisibleSpaces(text: string, positions: VisibleCharPosition[]): string {
+  let cut = positions.length;
+  while (cut > 0 && positions[cut - 1].char.trim() === "") cut--;
+  if (cut === positions.length) return text;
+
+  // Drop only the byte ranges of the trailing blank visible chars, keeping the escape
+  // sequences that sit between and after them. That is byte-for-byte what the previous
+  // remove-one-char-then-rescan loop produced, without the repeated O(n) rescans.
+  let result = text.slice(0, positions[cut].start);
+  for (let i = cut; i < positions.length - 1; i++) {
+    result += text.slice(positions[i].end, positions[i + 1].start);
   }
+  return result + text.slice(positions[positions.length - 1].end);
 }
 
+const HORIZONTAL_FRAME_LINE = /^[┌├└╭╰][─┬┴┼]+[┐┤┘╮╯]$/;
+
 export function normalizeCustomPanelLines(lines: string[]): string[] {
-  const horizontalFrameLine = /^[┌├└╭╰][─┬┴┼]+[┐┤┘╮╯]$/;
   const normalized: string[] = [];
 
   for (const rawLine of lines) {
     const lineWithoutCursor = rawLine.replace(TUI_CURSOR_MARKER_RE, "");
     const plain = stripAnsi(lineWithoutCursor).trimEnd();
-    if (horizontalFrameLine.test(plain)) continue;
+    if (HORIZONTAL_FRAME_LINE.test(plain)) continue;
 
+    // `positions` is recomputed only after `line` actually changes, so every read below
+    // sees the same values the previous per-call scans produced. Lines with no side
+    // borders (the common case) now scan once instead of five times.
     let line = lineWithoutCursor;
-    const first = firstVisibleChar(line);
+    let positions = visibleCharPositions(line);
+    const first = positions[0]?.char;
     if (first === "│" || first === "┃") {
-      line = removeVisibleCharAt(line, 0);
-      if (firstVisibleChar(line) === " ") line = removeVisibleCharAt(line, 0);
+      line = removeVisibleCharAt(line, 0, positions);
+      positions = visibleCharPositions(line);
+      if (positions[0]?.char === " ") {
+        line = removeVisibleCharAt(line, 0, positions);
+        positions = visibleCharPositions(line);
+      }
     }
 
-    const rightBorderIndex = lastNonSpaceVisibleCharIndex(line);
-    const rightBorder = rightBorderIndex >= 0 ? visibleCharPositions(line)[rightBorderIndex]?.char : undefined;
+    const rightBorderIndex = lastNonSpaceVisibleCharIndex(positions);
+    const rightBorder = rightBorderIndex >= 0 ? positions[rightBorderIndex]?.char : undefined;
     if (rightBorder === "│" || rightBorder === "┃") {
-      line = removeVisibleCharAt(line, rightBorderIndex);
+      line = removeVisibleCharAt(line, rightBorderIndex, positions);
+      positions = visibleCharPositions(line);
     }
 
-    normalized.push(trimEndVisibleSpaces(line));
+    normalized.push(trimEndVisibleSpaces(line, positions));
   }
 
   while (normalized.length > 0 && stripAnsi(normalized[0]).trim() === "") normalized.shift();

@@ -11,6 +11,8 @@ import {
 
 const VERSION = "0.0.1";
 const FIXED_ENTRIES = Object.freeze([
+  Object.freeze({ name: "@cortexkit/pi-magic-context", entry: "dist/index.js" }),
+  Object.freeze({ name: "pi-todo-rail", entry: "index.ts" }),
   Object.freeze({ name: "@ff-labs/pi-fff", entry: "src/index.ts" }),
   Object.freeze({ name: "pi-simplify", entry: "dist/index.js" }),
   Object.freeze({ name: "@gotgenes/pi-permission-system", entry: "src/index.ts" }),
@@ -28,6 +30,8 @@ export const VERSION = "0.84.2";
 const relocatedRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 const extensionRoot = path.join(relocatedRoot, "extensions");
 const definitions = [
+  ["@cortexkit/pi-magic-context", ["ctx_memory"], ["ctx-status"]],
+  ["pi-todo-rail", ["todo"], ["todo"]],
   ["@ff-labs/pi-fff", ["ffgrep", "fffind"], ["fff-mode"]],
   ["pi-simplify", [], ["simplify"]],
   ["@gotgenes/pi-permission-system", [], ["permission-system"]],
@@ -207,7 +211,7 @@ test("default extension smoke propagates inventory tampering before loading Pi",
   assert.equal(loaderCalled, false);
 });
 
-test("relocated Pi loader loads the five fixed extensions and ask-user skill", async (t) => {
+test("relocated Pi loader loads the fixed extensions and ask-user skill", async (t) => {
   const { packageRoot } = fixture(t);
   let verificationCalls = 0;
   const verifyBundle = async (...args) => {
@@ -224,17 +228,21 @@ test("relocated Pi loader loads the five fixed extensions and ask-user skill", a
   assert.deepEqual(result.skills, ["ask-user"]);
   assert.deepEqual(result.commands, [
     "ask-settings",
+    "ctx-status",
     "fff-mode",
     "permission-system",
     "simplify",
     "subagents:settings",
+    "todo",
   ]);
   assert.deepEqual(result.tools, [
     "ask_user",
+    "ctx_memory",
     "fffind",
     "ffgrep",
     "get_subagent_result",
     "steer_subagent",
     "subagent",
+    "todo",
   ]);
 });

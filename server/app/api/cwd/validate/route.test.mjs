@@ -71,18 +71,25 @@ test("returns a symlink-free canonical cwd", async (t) => {
   assert.equal(body.projectRoot, await realpath(realDirectory));
 });
 
-test("rejects filesystem root, home, and system directories without caching", async () => {
-  const systemDirectory = process.platform === "win32" ? process.env.SystemRoot : "/etc";
-  const candidates = [path.parse(os.homedir()).root, "~", systemDirectory].filter(Boolean);
+test("rejects the filesystem root without caching; home and system directories are grantable", async () => {
+  const root = path.parse(os.homedir()).root;
+  const response = await POST(new Request("http://localhost/api/cwd/validate", {
+    method: "POST",
+    headers: AUTHENTICATED_HEADERS,
+    body: JSON.stringify({ cwd: root }),
+  }));
+  assert.equal(response.status, 403, root);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
 
-  for (const cwd of candidates) {
-    const response = await POST(new Request("http://localhost/api/cwd/validate", {
+  // Self-hosted tailnet policy: home and system directories can be workspaces.
+  const systemDirectory = process.platform === "win32" ? process.env.SystemRoot : "/etc";
+  for (const cwd of ["~", systemDirectory].filter(Boolean)) {
+    const allowed = await POST(new Request("http://localhost/api/cwd/validate", {
       method: "POST",
       headers: AUTHENTICATED_HEADERS,
       body: JSON.stringify({ cwd }),
     }));
-    assert.equal(response.status, 403, String(cwd));
-    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    assert.equal(allowed.status, 200, String(cwd));
   }
 });
 

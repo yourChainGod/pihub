@@ -5,8 +5,26 @@ import test from "node:test";
 
 import {
   createSecureNpmEnvironment,
+  npmSpawnInvocation,
   prepareSecureNpmEnvironment,
 } from "./secure-npm-environment.mjs";
+
+test("Windows npm runs through the CLI entry instead of the blocked .cmd shim", () => {
+  const invocation = npmSpawnInvocation(["ci", "--ignore-scripts"], {
+    execPath: "D:\\node\\node.exe",
+    platform: "win32",
+  });
+  assert.equal(invocation.command, "D:\\node\\node.exe");
+  assert.deepEqual(invocation.args, [
+    "D:\\node\\node_modules\\npm\\bin\\npm-cli.js",
+    "ci",
+    "--ignore-scripts",
+  ]);
+
+  const unix = npmSpawnInvocation(["--version"], { platform: "linux" });
+  assert.equal(unix.command, "npm");
+  assert.deepEqual(unix.args, ["--version"]);
+});
 
 test("release npm receives a fixed credential-free environment", () => {
   const filesystemRoot = path.parse(process.cwd()).root;

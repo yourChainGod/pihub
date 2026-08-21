@@ -9,6 +9,8 @@ export interface Device {
   favorite: boolean;
   accent: string;
   os?: string;
+  /** Stable Tailscale CGNAT/IPv6 address; survives machine renames. */
+  ip?: string;
 }
 
 export interface DeviceStatus {
@@ -59,6 +61,8 @@ export interface RemoteSession {
   projectKey?: string;
   worktreeBranch?: string;
   transient?: boolean;
+  /** Last run was cut short (e.g. server restart); the turn never completed. */
+  interrupted?: boolean;
 }
 
 export interface SessionMessage {
@@ -97,19 +101,39 @@ export interface SessionDetail {
     model: { provider: string; modelId: string } | null;
     truncated?: boolean;
     totalMessages?: number;
+    /** Server answered an `after` cursor: messages holds only newer entries. */
+    incremental?: boolean;
+    /** The cursor was lost (compaction/rewrite): messages are a fresh window. */
+    reset?: boolean;
   };
   totalActiveMs: number;
 }
 
 export interface RemoteUiRequest {
   id: string;
-  method: "select" | "confirm" | "input" | "editor" | "notify" | string;
+  method: "select" | "confirm" | "input" | "editor" | "notify" | "setWidget" | "setTitle" | "set_editor_text" | string;
   title?: string;
   message?: string;
   options?: string[];
   placeholder?: string;
   prefill?: string;
   notifyType?: "info" | "warning" | "error";
+  /** custom: headless-rendered TUI lines for an extension's custom UI. */
+  lines?: string[];
+  /** custom: the extension closed this UI; remove the card. */
+  closed?: boolean;
+  /** setWidget: widget identity; widgetLines === undefined clears the widget. */
+  widgetKey?: string;
+  widgetLines?: string[];
+  widgetPlacement?: "aboveEditor" | "belowEditor";
+  /** set_editor_text: text the extension wants in the composer. */
+  text?: string;
+}
+
+export interface RemoteWidgetItem {
+  key: string;
+  lines: string[];
+  placement?: "aboveEditor" | "belowEditor";
 }
 
 export interface RemoteContextUsage {
@@ -127,6 +151,7 @@ export interface RemoteAgentState {
     model?: { id: string; provider: string };
     contextUsage?: RemoteContextUsage | null;
     systemPrompt?: string;
+    extensionWidgets?: RemoteWidgetItem[];
   };
 }
 
@@ -136,6 +161,14 @@ export interface RemoteAgentEventPayload {
   sessionId: string;
   generation: number;
   event: Record<string, unknown>;
+}
+
+export interface RemoteTerminalEventPayload {
+  deviceId: string;
+  deviceOrigin: string;
+  terminalId: string;
+  generation: number;
+  event: { type: string; data?: string; reason?: string };
 }
 
 export interface AttachedImage {
@@ -305,14 +338,24 @@ export interface NewRemoteSession {
 export interface RemoteSetupStatus {
   platform?: { os: string; remoteAccess: "tailscale-ssh" | "openssh"; openSshRunning: boolean; terminalBackend: string; preferredShell: string };
   tailscale: { installed: boolean; connected: boolean; dnsName: string; sshEnabled: boolean; sshSupported?: boolean; serveEnabled: boolean; serveUrl: string };
-  pi: { installed: boolean };
+  pi: { installed: boolean; version?: string | null };
   provider?: { installed: boolean; source: string };
   defaultExtensions: {
     installed: boolean;
     installedCount: number;
     total: number;
     source: "signed-release";
-    packages: Array<{ name: string; version: string; installed: boolean }>;
+    packages: Array<{ name: string; version: string; installed: boolean; installedVersion?: string | null }>;
+    magicContext: {
+      installed: boolean;
+      configured: boolean;
+      todoEnabled: boolean;
+      todoOverlay: boolean;
+      compactionEnabled: boolean;
+      agentsManaged: boolean;
+      version: string;
+      source: "signed-release";
+    };
   };
   server?: { installed: boolean; packageName: string; version: string | null; running: boolean };
   installPlan?: string[];

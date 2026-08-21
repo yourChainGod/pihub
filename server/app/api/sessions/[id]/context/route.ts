@@ -1,5 +1,4 @@
-import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { resolveSessionPath, buildSessionContext } from "@/lib/session-reader";
+import { resolveSessionPath, buildSessionContext, openSessionManagerCached } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { privateSessionJson, requireOwnedSession } from "@/lib/session-access";
 
@@ -23,7 +22,7 @@ export async function GET(
       return privateSessionJson({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = liveRpc?.inner.sessionManager ?? SessionManager.open(filePath!);
+    const sm = liveRpc?.inner.sessionManager ?? openSessionManagerCached(filePath!);
     const fullContext = buildSessionContext(sm.getEntries() as never, leafId, {
       deferThinking,
       deferToolResultImages,

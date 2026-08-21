@@ -14,7 +14,24 @@ cleanup() {
 }
 trap cleanup 0
 
-echo '[pihub] 已连接，正在准备 GitHub 签名版服务…'
+# "1" when the desktop paired the install with a one-time pairing code grant.
+export PIHUB_AUTO_PAIR="__PIHUB_AUTO_PAIR__"
+
+if [ "__PIHUB_LOCAL_ARCHIVE__" = "1" ]; then
+  step=接收本地发布包
+  echo '[pihub] 已连接，正在接收本地预编译服务包…'
+  cat > "$tmp/server.tgz"
+  archive_bytes=$(wc -c < "$tmp/server.tgz" | tr -d ' ')
+  if [ "$archive_bytes" -le 0 ] || [ "$archive_bytes" -gt 536870912 ]; then
+    echo '[pihub] 本地发布包大小异常，已拒绝执行' >&2
+    exit 1
+  fi
+  export PIHUB_LOCAL_ARCHIVE="$tmp/server.tgz"
+  export PIHUB_LOCAL_ARCHIVE_SHA256="__PIHUB_LOCAL_ARCHIVE_SHA256__"
+  echo "[pihub] 本地发布包接收完成（$archive_bytes 字节），正在校验并安装…"
+else
+  echo '[pihub] 已连接，正在准备 GitHub 签名版服务…'
+fi
 
 step=环境检查
 for directory in "$HOME"/.local/share/pi-node/node-*/bin; do
@@ -23,6 +40,9 @@ for directory in "$HOME"/.local/share/pi-node/node-*/bin; do
   fi
 done
 export PATH="$HOME/.local/bin:$PATH"
+
+# "1" only when the desktop user explicitly confirmed a root install.
+export PIHUB_ALLOW_ROOT="__PIHUB_ALLOW_ROOT__"
 
 node_compatible() {
   command -v node >/dev/null 2>&1 && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)'
@@ -132,11 +152,11 @@ if [ -f "$PI_SETTINGS" ] && grep -q 'pi-provider-newapi-hdd' "$PI_SETTINGS"; the
   echo PIHUB_LEGACY_PROVIDER_REMOVED
 fi
 
-step=安装GitHub签名服务
+step=安装PiHub服务
 installer="$tmp/pihub-standalone-bootstrap.mjs"
 node -e 'require("fs").writeFileSync(process.argv[2],Buffer.from(process.argv[1],"base64"),{flag:"wx",mode:384})' '__STANDALONE_BOOTSTRAP__' "$installer"
-if [ '__INSTALL_EXTENSIONS__' = '1' ]; then
-  node "$installer" --with-extensions
+if [ -n '__EXTENSION_SELECTION_BASE64__' ]; then
+  node "$installer" "--with-extensions=__EXTENSION_SELECTION_BASE64__"
 else
   node "$installer"
 fi

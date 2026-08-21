@@ -96,10 +96,11 @@ async function main() {
   const baseRuntimeEnvironment = createServerRuntimeEnvironment(process.env);
   const tailnetHostname = discoverTailnetHostname(baseRuntimeEnvironment);
   const jiti = createJiti(__filename, { interopDefault: true });
-  const { readDefaultExtensionsPreference } = await jiti.import("../lib/default-extensions.ts");
+  const { readDefaultExtensionsSelection } = await jiti.import("../lib/default-extensions.ts");
   const { getServerUpdateDataRoot, ProductionServerUpdateRuntime } = await jiti.import("../lib/server-update-runtime.ts");
   const dataRoot = getServerUpdateDataRoot({ platform: target.platform });
-  const defaultExtensionsEnabled = await readDefaultExtensionsPreference(dataRoot);
+  const selectedDefaultExtensions = await readDefaultExtensionsSelection(dataRoot);
+  const defaultExtensionsEnabled = selectedDefaultExtensions.length > 0;
   const logSinks = createSupervisorLogSinks(process.env);
 
   console.log(`PiHub server is loopback-only on ${hostname}:${port}. Use 'tailscale serve' for Tailnet access; Funnel is unsupported.`);
@@ -114,6 +115,7 @@ async function main() {
       tailnetHostname,
       baseRuntimeEnvironment,
       defaultExtensionsEnabled,
+      selectedDefaultExtensions,
       ...logSinks,
       logger: createSupervisorLogger(logSinks.stderrLogSink),
       runtimeFactory: ({ health }) => new ProductionServerUpdateRuntime({

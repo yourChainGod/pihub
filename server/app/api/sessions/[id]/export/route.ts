@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
-import { mkdirSync, readFileSync, realpathSync, rmSync } from "fs";
+import { mkdirSync, realpathSync, rmSync } from "fs";
+import { readFile } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, join, relative } from "path";
 import { getPackageDir } from "@earendil-works/pi-coding-agent";
@@ -219,7 +220,7 @@ export async function GET(
     try {
       await exportSession(filePath, outputPath, req.signal);
 
-      const html = readFileSync(outputPath, "utf8");
+      const html = await readFile(outputPath, "utf8");
       const patchedHtml = patchExportHtml(html);
       return new Response(patchedHtml, {
         headers: pihubNoStoreHeaders({

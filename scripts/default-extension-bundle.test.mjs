@@ -13,6 +13,10 @@ import {
 } from "./default-extension-bundle.mjs";
 import { addDefaultExtensionFixture } from "./default-extension-test-fixture.mjs";
 
+const EXTENSIONS_VERSION = JSON.parse(
+  fs.readFileSync(path.join(DEFAULT_EXTENSION_SOURCE_DIRECTORY, "package.json"), "utf8"),
+).version;
+
 function temporaryDirectory(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pihub-extension-test-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -41,9 +45,9 @@ async function bundleFixture(t) {
 }
 
 test("committed default extension manifest and lock pin the exact audited registry graph", () => {
-  const result = verifyDefaultExtensionSource({ expectedVersion: "0.0.1" });
-  assert.equal(result.lockSummary.externalEntries, 268);
-  assert.equal(result.lockSummary.productionDependencies, 5);
+  const result = verifyDefaultExtensionSource({ expectedVersion: EXTENSIONS_VERSION });
+  assert.equal(result.lockSummary.externalEntries, 343);
+  assert.equal(result.lockSummary.productionDependencies, 7);
   assert.equal(result.lockSummary.omittedPeerIntegrityEntries, 6);
   assert.equal(result.lockSummary.linkEntries, 0);
   assert.equal(result.lockSummary.bundledEntries, 0);
@@ -98,13 +102,13 @@ test("default extension lock rejects a structurally valid but unreviewed graph c
 
 test("synthetic physical bundle verifies peers, resources, inventory, and notices", async (t) => {
   const { extensionRoot, inventory, serverRoot, verification } = await bundleFixture(t);
-  assert.equal(verification.version, "0.0.1");
-  assert.equal(verification.packages.length, 6);
-  assert.equal(inventory.packages.length, 5);
+  assert.equal(verification.version, EXTENSIONS_VERSION);
+  assert.equal(verification.packages.length, 10);
+  assert.equal(inventory.packages.length, 7);
   const inventorySource = fs.readFileSync(path.join(extensionRoot, "inventory.json"), "utf8");
   assert.equal(inventorySource, canonicalExtensionJson(inventory));
   assert.equal(inventorySource.endsWith("\n"), false);
-  await verifyDefaultExtensionBundle(extensionRoot, { expectedVersion: "0.0.1", serverRoot });
+  await verifyDefaultExtensionBundle(extensionRoot, { expectedVersion: EXTENSIONS_VERSION, serverRoot });
 });
 
 test("physical bundle rejects nested Pi, unreviewed lifecycle packages, and missing resources", async (t) => {
@@ -159,7 +163,7 @@ test("physical bundle rejects canonical inventory and content tampering", async 
   );
 });
 
-test("staging invokes npm with a credential-free strict omit-peer contract", (t) => {
+test("staging invokes npm with a credential-free omit-peer contract and explicit audited peer compatibility", (t) => {
   const destinationDirectory = temporaryDirectory(t);
   const calls = [];
   const previous = {
@@ -202,7 +206,7 @@ test("staging invokes npm with a credential-free strict omit-peer contract", (t)
     "--omit=peer",
     "--engine-strict=true",
     "--no-bin-links",
-    "--legacy-peer-deps=false",
+    "--legacy-peer-deps=true",
     "--force=false",
   ]) {
     assert.ok(install.args.includes(flag), `missing npm flag ${flag}`);
@@ -212,7 +216,7 @@ test("staging invokes npm with a credential-free strict omit-peer contract", (t)
   assert.equal(install.options.env.NPM_TOKEN, undefined);
   assert.equal(install.options.env.NPM_CONFIG_REGISTRY, "https://registry.npmjs.org/");
   assert.equal(install.options.env.NPM_CONFIG_IGNORE_SCRIPTS, "true");
-  assert.equal(install.options.env.NPM_CONFIG_LEGACY_PEER_DEPS, "false");
+  assert.equal(install.options.env.NPM_CONFIG_LEGACY_PEER_DEPS, "true");
   const serializedEnvironment = JSON.stringify(install.options.env);
   assert.equal(serializedEnvironment.includes("test-only"), false);
   assert.equal(serializedEnvironment.includes("private-extension-builder"), false);

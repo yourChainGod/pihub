@@ -1,8 +1,7 @@
 import { realpathSync, statSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import { isFilesystemRootPath, isPathWithinRoots } from "./path-security";
-import { isWindowsAbsolutePath, samePath, toSlashPath } from "./paths";
+import { isFilesystemRootPath } from "./path-security";
+import { isWindowsAbsolutePath, toSlashPath } from "./paths";
 
 export interface AllowedRootScope {
   /** Stable authenticated identity. Never populate this from request input. */
@@ -86,105 +85,11 @@ export function allowedRootKey(filePath: string): string {
   return isWindowsAbsolutePath(filePath) ? normalized.toLowerCase() : normalized;
 }
 
-function canonicalIfPresent(filePath: string): string {
-  try {
-    return realpathSync.native(filePath);
-  } catch {
-    return path.resolve(filePath);
-  }
-}
-
-function exactSensitiveRoots(home: string): string[] {
-  const candidates = [
-    tmpdir(),
-    path.parse(home).root,
-    ...(process.platform === "win32"
-      ? [
-          process.env.PUBLIC,
-        ]
-      : ["/home", "/Users", "/Volumes", "/mnt", "/media", "/tmp", "/opt", "/var"]),
-  ];
-  return candidates
-    .filter((candidate): candidate is string => Boolean(candidate))
-    .map(canonicalIfPresent);
-}
-
-function sensitiveTrees(home: string): string[] {
-  const homeTrees = [
-    ".ssh",
-    ".gnupg",
-    ".aws",
-    ".azure",
-    ".cache",
-    ".config",
-    ".kube",
-    ".docker",
-    ".local/share",
-    ".npm",
-    ".password-store",
-    ".pi",
-    ".codex",
-  ].map((relative) => path.join(home, relative));
-
-  if (process.platform === "win32") {
-    const systemDrive = path.parse(home).root;
-    return [
-      ...homeTrees,
-      path.join(home, "AppData"),
-      process.env.SystemRoot,
-      process.env.ProgramFiles,
-      process.env["ProgramFiles(x86)"],
-      process.env.ProgramData,
-      path.join(systemDrive, "Windows"),
-      path.join(systemDrive, "Program Files"),
-      path.join(systemDrive, "Program Files (x86)"),
-      path.join(systemDrive, "ProgramData"),
-    ].filter((candidate): candidate is string => Boolean(candidate)).map(canonicalIfPresent);
-  }
-
-  const systemTrees = [
-    "/boot",
-    "/dev",
-    "/etc",
-    "/proc",
-    "/root",
-    "/run",
-    "/sys",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/lib",
-    "/lib64",
-    "/var/lib",
-    "/var/log",
-    "/var/run",
-  ];
-  if (process.platform === "darwin") {
-    systemTrees.push(
-      "/Applications",
-      "/Library",
-      "/System",
-      "/private/etc",
-      "/private/var/db",
-      "/private/var/log",
-      "/private/var/root",
-      "/private/var/run",
-    );
-    homeTrees.push(path.join(home, "Library"));
-  }
-  return [...homeTrees, ...systemTrees].map(canonicalIfPresent);
-}
 
 function isUnsafeCanonicalRoot(canonicalRoot: string): boolean {
-  if (isFilesystemRootPath(canonicalRoot)) return true;
-  const home = canonicalIfPresent(homedir());
-  if (samePath(canonicalRoot, home)) return true;
-  if (exactSensitiveRoots(home).some((candidate) => samePath(canonicalRoot, candidate))) {
-    return true;
-  }
-  return sensitiveTrees(home).some((sensitiveRoot) => (
-    isPathWithinRoots(canonicalRoot, new Set([sensitiveRoot]))
-  ));
+  // Self-hosted, single-tailnet deployment: any real directory may be granted
+  // as a workspace except the filesystem root itself.
+  return isFilesystemRootPath(canonicalRoot);
 }
 
 /** Resolve and validate a workspace directory without granting it. */

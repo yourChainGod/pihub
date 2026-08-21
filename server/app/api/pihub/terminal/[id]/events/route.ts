@@ -12,6 +12,9 @@ import {
 
 export const dynamic = "force-dynamic";
 const HEARTBEAT_MS = 15_000;
+// PTY chunks arrive per read(); coalesce bursts into one SSE frame so
+// full-screen TUI redraws don't emit a frame per chunk.
+const OUTPUT_BATCH_MS = 30;
 
 function jsonError(status: 401 | 403 | 404 | 429, message: string): Response {
   return NextResponse.json({ error: message }, {
@@ -76,6 +79,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         if (closed) return;
         closed = true;
         request.signal.removeEventListener("abort", onAbort);
+        if (batchTimer) {
+          clearTimeout(batchTimer);
+          batchTimer = null;
+        }
+        batchedOutput = "";
         if (heartbeat) {
           clearInterval(heartbeat);
           heartbeat = null;
@@ -99,10 +107,46 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         sendBytes(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
         if (event.type === "exit") finish(true);
       };
+      let batchedOutput = "";
+      let batchTimer: ReturnType<typeof setTimeout> | null = null;
+      const flushBatchedOutput = () => {
+        if (batchTimer) {
+          clearTimeout(batchTimer);
+          batchTimer = null;
+        }
+        if (!batchedOutput) return;
+        const data = batchedOutput;
+        batchedOutput = "";
+        sendEvent({ type: "output", data });
+      };
+      const enqueueEvent = (event: TerminalEvent) => {
+        if (closed) return;
+        if (event.type === "output") {
+          if (batchTimer) {
+            batchedOutput += event.data;
+            // Slow consumer: flush now so enqueue depth (and the backpressure
+            // shutdown) still reflects un-read output.
+            if (controller.desiredSize !== null && controller.desiredSize <= 0) flushBatchedOutput();
+            return;
+          }
+          // Leading edge: send immediately so backpressure still applies
+          // synchronously, then coalesce bursts within the batch window.
+          sendEvent(event);
+          if (closed) return;
+          batchTimer = setTimeout(() => {
+            batchTimer = null;
+            flushBatchedOutput();
+          }, OUTPUT_BATCH_MS);
+          batchTimer.unref?.();
+          return;
+        }
+        flushBatchedOutput();
+        sendEvent(event);
+      };
       const onAbort = () => finish(true);
 
       cleanup = finish;
-      eventSink = sendEvent;
+      eventSink = enqueueEvent;
       request.signal.addEventListener("abort", onAbort, { once: true });
       if (initialOutput) sendEvent({ type: "output", data: initialOutput });
       for (const event of pending.splice(0)) sendEvent(event);

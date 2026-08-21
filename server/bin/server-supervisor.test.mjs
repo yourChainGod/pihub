@@ -11,6 +11,7 @@ const require = createRequire(import.meta.url);
 const {
   SERVER_UPDATE_IPC_PROTOCOL,
   StableServerSupervisor,
+  provisionSignedDefaultExtensions,
 } = require("./server-supervisor.js");
 const { INTERNAL_NEXT_SENTINEL } = require("./runtime-entry.js");
 
@@ -392,7 +393,7 @@ test("current activation and rollback each stop the old child and verify the rep
       provisions.push(packageRoot);
       return {
         rollback: async () => undefined,
-        status: { installed: true, installedCount: 5, source: "signed-release", total: 5 },
+        status: { installed: true, installedCount: 7, source: "signed-release", total: 7 },
       };
     },
   });
@@ -477,6 +478,68 @@ test("current activation and rollback each stop the old child and verify the rep
   });
 });
 
+test("supervisor forwards the persisted extension subset on restart", async () => {
+  const selected = [{ name: "pi-todo-rail", version: "0.2.3" }];
+  let provisionOptions;
+  const { supervisor } = createSupervisor({
+    defaultExtensionsEnabled: true,
+    selectedDefaultExtensions: selected,
+    extensionProvisioner: async (_packageRoot, options) => {
+      provisionOptions = options;
+      return {
+        rollback: async () => undefined,
+        status: {
+          installed: false,
+          installedCount: 1,
+          source: "signed-release",
+          total: 7,
+          packages: [
+            { name: "@cortexkit/pi-magic-context", installed: false },
+            { name: "pi-todo-rail", installed: true },
+            { name: "@ff-labs/pi-fff", installed: false },
+            { name: "pi-simplify", installed: false },
+            { name: "@gotgenes/pi-permission-system", installed: false },
+            { name: "@eko24ive/pi-ask", installed: false },
+            { name: "@gotgenes/pi-subagents", installed: false },
+          ],
+        },
+      };
+    },
+  });
+
+  await supervisor.provisionCurrentExtensions("/current-release");
+  assert.deepEqual(provisionOptions.selectedPackages, selected);
+});
+
+test("signed default extension provisioner preserves the persisted selection", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pihub-supervisor-provisioner-"));
+  t.after(() => fs.rmSync(root, { force: true, recursive: true }));
+  fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+  const marker = path.join(root, "selected.json");
+  fs.writeFileSync(path.join(root, "bin", "default-extensions.js"), [
+    "module.exports = { provisionDefaultExtensions: async (_root, options) => {",
+    `  require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify(options));`,
+    "  return async () => undefined;",
+    "} };",
+  ].join("\n"));
+
+  const selected = [{ name: "pi-todo-rail", version: "0.2.3" }];
+  const environment = { PIHUB_TEST_SELECTION: "test" };
+  const rollback = await provisionSignedDefaultExtensions(root, {
+    environment,
+    expectedPackages: selected,
+    selectedPackages: selected,
+    home: "/tmp/pihub-test-home",
+  });
+  assert.equal(typeof rollback, "function");
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, "utf8")), {
+    environment,
+    expectedPackages: selected,
+    selectedPackages: selected,
+    home: "/tmp/pihub-test-home",
+  });
+});
+
 test("startup repairs default extensions before spawning and restores their exact snapshot on health failure", async () => {
   const events = [];
   const runtime = createRuntime({
@@ -493,7 +556,7 @@ test("startup repairs default extensions before spawning and restores their exac
       events.push(["provision", packageRoot]);
       return {
         rollback: async () => { events.push(["rollback", packageRoot]); },
-        status: { installed: true, installedCount: 5, source: "signed-release", total: 5 },
+        status: { installed: true, installedCount: 7, source: "signed-release", total: 7 },
       };
     },
     runtime,

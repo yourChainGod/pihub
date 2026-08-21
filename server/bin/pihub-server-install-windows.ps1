@@ -321,8 +321,15 @@ if ($ValidateDefinition) {
 }
 
 $windowsPrincipal = [System.Security.Principal.WindowsPrincipal]::new($identity)
-if ($windowsPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw "PiHub must be installed and run from a non-elevated terminal. Do not run this installer as Administrator."
+if (-not $RunServer -and $windowsPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  # Administrator installs lose the limited-user isolation the Task Scheduler
+  # service is designed around; they require the same kind of explicit opt-in
+  # as PIHUB_ALLOW_ROOT=1 on Unix (owner-confirmed self-host installs only).
+  # The gate is install-time only: the scheduled task cannot inherit the
+  # opt-in variable, and the opt-in was already enforced when it registered.
+  if ($env:PIHUB_ALLOW_ADMIN -ne "1") {
+    throw "PiHub must be installed and run from a non-elevated terminal. Do not run this installer as Administrator. Set PIHUB_ALLOW_ADMIN=1 only for an explicitly confirmed self-host Administrator install."
+  }
 }
 
 if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {

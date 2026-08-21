@@ -65,8 +65,10 @@ function serviceUsage() {
 }
 
 function assertUnprivilegedUser(platform, uid) {
-  if ((platform === "darwin" || platform === "linux") && uid === 0) {
-    throw new Error("PiHub must be installed and run as the signed-in user. Do not run this installer with sudo or as root.");
+  // Root installs are permitted only when the desktop user explicitly confirmed
+  // them; the bootstrap then exports PIHUB_ALLOW_ROOT=1.
+  if ((platform === "darwin" || platform === "linux") && uid === 0 && process.env.PIHUB_ALLOW_ROOT !== "1") {
+    throw new Error("PiHub must be installed and run as the signed-in user. Do not run this installer with sudo or as root. Root installs require PIHUB_ALLOW_ROOT=1 from an explicitly confirmed desktop bootstrap.");
   }
   if ((platform === "darwin" || platform === "linux") && (!Number.isInteger(uid) || uid < 0)) {
     throw new Error("Could not determine the current user id; refusing to install a persistent service.");
@@ -247,6 +249,12 @@ function systemdQuote(value, { escapeDollar = false } = {}) {
   return `"${escaped}"`;
 }
 
+// systemd < 245 treats the quotes in WorkingDirectory="..." as part of the
+// path ("not absolute"); only quote when the value actually needs it.
+function systemdPathDirective(value) {
+  return /[\s"'\\$%]/.test(value) ? systemdQuote(value) : String(value);
+}
+
 function effectivePath(nodePath, environmentPath = "") {
   const values = [path.dirname(nodePath), ...environmentPath.split(path.delimiter), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"];
   return [...new Set(values.filter((value) => path.isAbsolute(value) && !/[\0\r\n]/.test(value)))].join(path.delimiter);
@@ -298,10 +306,11 @@ Type=simple
 Environment=${systemdQuote("PIHUB_HEADLESS=1")}
 Environment=${systemdQuote(`PIHUB_LOG_DIRECTORY=${logDirectory}`)}
 Environment=${systemdQuote(`PATH=${servicePath}`)}
-WorkingDirectory=${systemdQuote(path.dirname(serverPath))}
+WorkingDirectory=${systemdPathDirective(path.dirname(serverPath))}
 ExecStart=${execStart}
 Restart=on-failure
 RestartSec=2
+StartLimitIntervalSec=0
 UMask=0077
 StandardOutput=journal
 StandardError=journal
@@ -411,7 +420,9 @@ async function waitForHealth({
   expectedVersion,
   fetchImpl = globalThis.fetch,
   healthUrl = HEALTH_URL,
-  timeoutMs = 20_000,
+  // Small-memory hosts can take well over 20s from restart to a healthy Next
+  // server; a slow boot is not a failure (round-7 rollback loop).
+  timeoutMs = 90_000,
   retryDelayMs = 400,
 } = {}) {
   if (typeof expectedVersion !== "string" || !RELEASE_VERSION_PATTERN.test(expectedVersion)) {

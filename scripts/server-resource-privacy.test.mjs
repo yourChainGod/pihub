@@ -15,6 +15,8 @@ import { createRequire } from "node:module";
 import { scanTextContent } from "./privacy-scan.mjs";
 import {
   assertTreeDoesNotContainPaths,
+  isAuditedServerStagingArchiveFinding,
+  isAuditedServerStagingPrivacyFinding,
   normalizePortableNextBuildPaths,
   pruneServerBuildMetadata,
   pruneServerDependencyTree,
@@ -235,5 +237,47 @@ test("source-root assertion does not allow known CI placeholder usernames", asyn
   assert.throws(
     () => assertTreeDoesNotContainPaths(root, [runnerRoot]),
     /forbidden build path/,
+  );
+});
+
+test("audited server staging findings require the pinned file at the pinned path", async (t) => {
+  const root = await temporaryDirectory(t);
+  const auditedPath = "node_modules/@next/swc-win32-x64-msvc/next-swc.win32-x64-msvc.node";
+  const finding = { path: auditedPath, rule: "absolute-user-path" };
+  // Missing file never audits.
+  assert.equal(isAuditedServerStagingPrivacyFinding(root, finding), false);
+  // Extension-tree findings are the extension audit's job, not this one's.
+  assert.equal(
+    isAuditedServerStagingPrivacyFinding(root, { path: "extensions/node_modules/x/y.node", rule: "absolute-user-path" }),
+    false,
+  );
+  // Unknown paths and wrong rules never audit.
+  assert.equal(isAuditedServerStagingPrivacyFinding(root, { path: "node_modules/evil/index.js", rule: "absolute-user-path" }), false);
+  assert.equal(isAuditedServerStagingPrivacyFinding(root, { path: auditedPath, rule: "generic-secret" }), false);
+  // A file at the pinned path with different bytes never audits.
+  await mkdir(path.dirname(path.join(root, ...auditedPath.split("/"))), { recursive: true });
+  await writeFile(path.join(root, ...auditedPath.split("/")), "not the real binary");
+  assert.equal(isAuditedServerStagingPrivacyFinding(root, finding), false);
+});
+
+test("audited archive findings verify against the streamed member hash", () => {
+  const finding = {
+    path: "archive!node_modules/@next/swc-win32-x64-msvc/next-swc.win32-x64-msvc.node",
+    rule: "absolute-user-path",
+  };
+  assert.equal(
+    isAuditedServerStagingArchiveFinding(finding, "1589d4ef2398a4076f34cd03bf59bc7c164e6b03b1badbca27e3dbf111208555"),
+    true,
+  );
+  // Wrong/missing streamed hash never audits, nor do unknown paths or rules.
+  assert.equal(isAuditedServerStagingArchiveFinding(finding, "0".repeat(64)), false);
+  assert.equal(isAuditedServerStagingArchiveFinding(finding, undefined), false);
+  assert.equal(
+    isAuditedServerStagingArchiveFinding({ path: "archive!node_modules/evil/x.node", rule: "absolute-user-path" }, "0".repeat(64)),
+    false,
+  );
+  assert.equal(
+    isAuditedServerStagingArchiveFinding({ ...finding, rule: "generic-secret" }, "1589d4ef2398a4076f34cd03bf59bc7c164e6b03b1badbca27e3dbf111208555"),
+    false,
   );
 });

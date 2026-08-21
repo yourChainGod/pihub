@@ -15,6 +15,24 @@ const markdownSanitizeSchema = {
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };
 
+// Closing matchers for the raw HTML code tags detected below. The tag is a
+// variable, so the pattern has to be built with `new RegExp`; compiling it once
+// per tag keeps the per-line scan in normalizeDisplayMath free of regex
+// compilation. These stay non-global so `test()` never advances `lastIndex`.
+const RAW_CODE_TAGS = ["code", "pre", "script", "style"] as const;
+const rawCodeCloseMatchers = new Map<string, RegExp>(
+  RAW_CODE_TAGS.map((tag) => [tag, new RegExp(`</${tag}\\s*>`, "i")]),
+);
+
+function rawCodeCloseMatcher(tag: string): RegExp {
+  let matcher = rawCodeCloseMatchers.get(tag);
+  if (!matcher) {
+    matcher = new RegExp(`</${tag}\\s*>`, "i");
+    rawCodeCloseMatchers.set(tag, matcher);
+  }
+  return matcher;
+}
+
 export function normalizeDisplayMath(markdown: string): string {
   const lineBreak = markdown.includes("\r\n") ? "\r\n" : "\n";
   const lines = markdown.split(/\r?\n/);
@@ -29,7 +47,7 @@ export function normalizeDisplayMath(markdown: string): string {
 
     if (rawCodeTag) {
       normalized.push(line);
-      if (new RegExp(`</${rawCodeTag}\\s*>`, "i").test(line)) rawCodeTag = null;
+      if (rawCodeCloseMatcher(rawCodeTag).test(line)) rawCodeTag = null;
       continue;
     }
 
@@ -53,7 +71,7 @@ export function normalizeDisplayMath(markdown: string): string {
     if (rawCodeOpen) {
       const tag = rawCodeOpen[1].toLowerCase();
       const remainder = line.slice((rawCodeOpen.index ?? 0) + rawCodeOpen[0].length);
-      if (!new RegExp(`</${tag}\\s*>`, "i").test(remainder)) rawCodeTag = tag;
+      if (!rawCodeCloseMatcher(tag).test(remainder)) rawCodeTag = tag;
       inlineCodeMarkerSize = 0;
       normalized.push(line);
       continue;

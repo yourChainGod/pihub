@@ -103,7 +103,11 @@ test("desktop v1 updater identity is pinned and has no legacy manifest fallback"
 });
 
 test("active credential and bundle identities cannot alias the legacy 0.2.1 install", () => {
-  const rust = read("src-tauri/src/lib.rs");
+  // lib.rs is split into domain modules; device identity lives in devices.rs
+  // and keyring identity in credentials.rs.
+  const deviceModule = read("src-tauri/src/devices.rs");
+  const credentialModule = read("src-tauri/src/credentials.rs");
+  const rust = `${deviceModule}\n${credentialModule}`;
   const identityModule = read("scripts/product-identity.mjs");
 
   assert.notEqual(DESKTOP_BUNDLE_IDENTIFIER, LEGACY_DESKTOP_BUNDLE_IDENTIFIER);
@@ -116,7 +120,7 @@ test("active credential and bundle identities cannot alias the legacy 0.2.1 inst
   for (const legacyValue of [LEGACY_DESKTOP_BUNDLE_IDENTIFIER, LEGACY_DESKTOP_KEYRING_SERVICE]) {
     for (const [relativePath, source] of [
       ["scripts/product-identity.mjs", identityModule],
-      ["src-tauri/src/lib.rs", rust],
+      ["src-tauri/src/devices.rs + credentials.rs", rust],
     ]) {
       const lines = source.split("\n").flatMap((line, index) =>
         line.includes(legacyValue) ? [{ line: index + 1, text: line }] : []

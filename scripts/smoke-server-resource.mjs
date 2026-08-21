@@ -22,6 +22,14 @@ const HOST_PI_PACKAGE = "@earendil-works/pi-coding-agent";
 const HOST_PI_VERSION = "0.84.2";
 const EXTENSION_PROBE_MARKER = "PIHUB_DEFAULT_EXTENSION_PROBE=";
 const REPRESENTATIVE_EXTENSION_RESOURCES = Object.freeze({
+  "@cortexkit/pi-magic-context": Object.freeze({
+    commands: Object.freeze(["ctx-status"]),
+    tools: Object.freeze(["ctx_memory"]),
+  }),
+  "pi-todo-rail": Object.freeze({
+    commands: Object.freeze(["todo"]),
+    tools: Object.freeze(["todo"]),
+  }),
   "@ff-labs/pi-fff": Object.freeze({
     commands: Object.freeze(["fff-mode"]),
     tools: Object.freeze(["ffgrep", "fffind"]),
@@ -171,8 +179,8 @@ function relocatedExtensionResources(packageRoot) {
       skills.push(resource);
     }
   }
-  if (extensions.length !== 5 || skills.length !== 1) {
-    throw new Error("Default extension smoke must load exactly five entries and one skill root");
+  if (extensions.length !== 7 || skills.length !== 1) {
+    throw new Error("Default extension smoke must load exactly seven entries and one skill root");
   }
   return { extensionRoot, extensions, skills };
 }
@@ -242,7 +250,7 @@ export async function smokeRelocatedDefaultExtensions(packageRoot, {
     throw new Error(`Default extension loader reported an error: ${detail}`);
   }
   if (!Array.isArray(extensionResult.extensions) || extensionResult.extensions.length !== resources.extensions.length) {
-    throw new Error("Default extension loader did not return exactly five extensions");
+    throw new Error("Default extension loader did not return exactly seven extensions");
   }
   const expectedByPath = new Map(resources.extensions.map((entry) => [portablePathKey(entry.path), entry]));
   const loadedNames = [];

@@ -21,25 +21,26 @@ const AUTHENTICATED_HEADERS = {
   "x-pihub-authenticated-capabilities": "agents:use",
 };
 
-test("new-agent requests reject protected cwd before session startup", async () => {
-  for (const cwd of [path.parse(os.homedir()).root, os.homedir()]) {
-    const response = await POST(new Request("http://localhost/api/agent/new", {
-      method: "POST",
-      headers: AUTHENTICATED_HEADERS,
-      body: JSON.stringify({ cwd, type: "ensure_session" }),
-    }));
+test("new-agent requests reject the filesystem root before session startup", async () => {
+  // Self-hosted tailnet policy: only the filesystem root itself is protected;
+  // home and other directories are grantable workspaces.
+  const cwd = path.parse(os.homedir()).root;
+  const response = await POST(new Request("http://localhost/api/agent/new", {
+    method: "POST",
+    headers: AUTHENTICATED_HEADERS,
+    body: JSON.stringify({ cwd, type: "ensure_session" }),
+  }));
 
-    assert.equal(response.status, 403);
-    assert.equal(response.headers.get("cache-control"), "private, no-store");
-    assert.match((await response.json()).error, /protected/i);
-  }
+  assert.equal(response.status, 403);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  assert.match((await response.json()).error, /protected/i);
 });
 
 test("new-agent prompt rejection preserves the response contract", async () => {
   const response = await POST(new Request("http://localhost/api/agent/new", {
     method: "POST",
     headers: AUTHENTICATED_HEADERS,
-    body: JSON.stringify({ cwd: os.homedir(), type: "prompt", message: "hello" }),
+    body: JSON.stringify({ cwd: path.parse(os.homedir()).root, type: "prompt", message: "hello" }),
   }));
 
   assert.equal(response.status, 403);

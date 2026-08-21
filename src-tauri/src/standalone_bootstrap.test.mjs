@@ -21,6 +21,8 @@ const MANIFEST_URL = `https://github.com/${OWNER}/${REPO}/releases/latest/downlo
 const MANIFEST_DOMAIN = "PIHUB-RELEASE-MANIFEST-V1\n";
 const ASSET_DOMAIN = "PIHUB-RELEASE-ASSET-V1\n";
 const EXTENSIONS = [
+  { name: "@cortexkit/pi-magic-context", version: "0.38.0", resource: "dist/index.js" },
+  { name: "pi-todo-rail", version: "0.2.3", resource: "index.ts" },
   { name: "@ff-labs/pi-fff", version: "0.10.5", resource: "src/index.ts" },
   { name: "pi-simplify", version: "0.2.3", resource: "dist/index.js" },
   { name: "@gotgenes/pi-permission-system", version: "26.3.0", resource: "src/index.ts" },
@@ -411,7 +413,7 @@ test("requesting extensions fails closed when the signed archive has no extensio
   );
 });
 
-test("a successful install activates all five extensions from the signed version", async (t) => {
+test("a successful install activates all signed extensions from the signed version", async (t) => {
   const archive = createArchive(runtimeEntries({ extensions: true }));
   const release = signedRelease(archive);
   const serviceCalls = [];
@@ -425,7 +427,11 @@ test("a successful install activates all five extensions from the signed version
   assert.deepEqual(serviceCalls.map(({ command }) => command), ["install"]);
   assert.equal(
     fs.readFileSync(path.join(fixture.dataRoot, "state", "default-extensions.json"), "utf8"),
-    bootstrap.canonicalizeReleaseJson({ schemaVersion: 1, enabled: true }),
+    bootstrap.canonicalizeReleaseJson({
+      schemaVersion: 1,
+      enabled: true,
+      selectedPackages: EXTENSIONS.map(({ name, version }) => ({ name, version })),
+    }),
   );
   const settings = JSON.parse(fs.readFileSync(path.join(fixture.home, ".pi", "agent", "settings.json"), "utf8"));
   assert.deepEqual(settings.packages, EXTENSIONS.map(({ name }) => `pihub/packages/${name}`));
@@ -435,6 +441,29 @@ test("a successful install activates all five extensions from the signed version
   ));
   assert.equal(permission.permission.path["*.env"], "deny");
   assert.equal(permission.permission.bash["rm -rf /"], "deny");
+});
+
+test("a selected extension subset activates only the checked package", async (t) => {
+  const archive = createArchive(runtimeEntries({ extensions: true }));
+  const release = signedRelease(archive);
+  const fixture = installFixture(t, archive, release, {
+    selectedExtensions: [{ name: EXTENSIONS[1].name, version: EXTENSIONS[1].version }],
+  });
+
+  await bootstrap.installStandaloneRelease(fixture.options);
+
+  const settings = JSON.parse(fs.readFileSync(path.join(fixture.home, ".pi", "agent", "settings.json"), "utf8"));
+  assert.deepEqual(settings.packages, [`pihub/packages/${EXTENSIONS[1].name}`]);
+  assert.equal(fs.existsSync(path.join(fixture.home, ".pi", "agent", "pihub", "packages", ...EXTENSIONS[0].name.split("/"), "package.json")), false);
+  assert.equal(fs.existsSync(path.join(fixture.home, ".pi", "agent", "extensions")), false);
+  assert.equal(
+    fs.readFileSync(path.join(fixture.dataRoot, "state", "default-extensions.json"), "utf8"),
+    bootstrap.canonicalizeReleaseJson({
+      schemaVersion: 1,
+      enabled: true,
+      selectedPackages: [{ name: EXTENSIONS[1].name, version: EXTENSIONS[1].version }],
+    }),
+  );
 });
 
 test("a service failure restores extension settings and managed facade files", async (t) => {
@@ -510,13 +539,14 @@ test("a service-phase crash journal rolls forward and repairs mixed extension fa
   fs.writeFileSync(
     path.join(fixture.dataRoot, "state", "bootstrap-install.json"),
     bootstrap.canonicalizeReleaseJson({
-      schemaVersion: 2,
+      schemaVersion: 4,
       phase: "service",
       version: VERSION,
       previousVersion: null,
       previousPointerExisted: false,
       defaultExtensionsEnabled: true,
-      previousDefaultExtensionsEnabled: null,
+      selectedExtensions: EXTENSIONS.map(({ name, version }) => ({ name, version })),
+      previousDefaultExtensions: null,
       stagingId,
     }),
   );
@@ -547,4 +577,80 @@ test("a service-phase crash journal rolls forward and repairs mixed extension fa
       ...EXTENSIONS[0].resource.split("/"),
     ),
   );
+});
+
+
+test("a local prebuilt archive installs without GitHub or signatures", async (t) => {
+  const archive = createArchive(runtimeEntries());
+  const archivePath = path.join(suiteRoot, "local-release.tar.gz");
+  fs.writeFileSync(archivePath, archive);
+  const fixture = installFixture(t, archive, null, {
+    fetchImpl: async () => {
+      throw new Error("network must not be used in local archive mode");
+    },
+    localAsset: { path: archivePath, sha256: sha256(archive) },
+  });
+
+  const result = await bootstrap.installStandaloneRelease(fixture.options);
+
+  assert.deepEqual(result, { version: VERSION, installed: true });
+  assert.equal(
+    fs.readFileSync(path.join(fixture.dataRoot, "state", "current.json"), "utf8"),
+    bootstrap.canonicalizeReleaseJson({ schemaVersion: 1, version: VERSION }),
+  );
+  assert.equal(fs.existsSync(path.join(fixture.dataRoot, "versions", VERSION, "bin", "runtime-entry.js")), true);
+});
+
+test("a local archive with a wrong or malformed sha256 is rejected", async (t) => {
+  const archive = createArchive(runtimeEntries());
+  const archivePath = path.join(suiteRoot, "local-tampered.tar.gz");
+  fs.writeFileSync(archivePath, archive);
+
+  const tampered = installFixture(t, archive, null, {
+    localAsset: { path: archivePath, sha256: sha256("tampered") },
+  });
+  await assert.rejects(bootstrap.installStandaloneRelease(tampered.options), /integrity verification/i);
+  assert.equal(fs.existsSync(path.join(tampered.dataRoot, "versions", VERSION)), false);
+
+  const malformed = installFixture(t, archive, null, {
+    localAsset: { path: archivePath, sha256: "not-a-sha256" },
+  });
+  await assert.rejects(bootstrap.installStandaloneRelease(malformed.options), /sha256 is invalid/i);
+});
+
+test("extension inventory accepts a full-size bundle file list", () => {
+  // 72 locked packages pull in thousands of runtime files (onnxruntime/sharp);
+  // the strict parser node cap must scale with MAX_EXTENSION_FILES.
+  const files = [];
+  for (let index = 0; index < 6000; index += 1) {
+    files.push({
+      path: `node_modules/@cortexkit/pi-magic-context/dist/f${String(index).padStart(5, "0")}.js`,
+      size: 1,
+      sha256: "a".repeat(64),
+    });
+  }
+  const expected = EXTENSIONS.map(({ name, version }) => ({ name, version }));
+  const raw = bootstrap.canonicalizeReleaseJson({
+    schemaVersion: 1,
+    packages: expected,
+    files,
+    totalBytes: files.length,
+  });
+  const parsed = bootstrap.parseExtensionInventory(raw, expected);
+  assert.equal(parsed.files.length, 6000);
+});
+
+test("sanitized child environment keeps the explicit root-install opt-in", () => {
+  const env = bootstrap.sanitizedChildEnvironment({
+    PATH: "/usr/bin",
+    PIHUB_ALLOW_ROOT: "1",
+    PIHUB_ALLOW_ADMIN: "1",
+    PIHUB_LOCAL_ARCHIVE: "/tmp/should-not-propagate.tgz",
+    AWS_SECRET_ACCESS_KEY: "nope",
+  });
+  assert.equal(env.PIHUB_ALLOW_ROOT, "1");
+  assert.equal(env.PIHUB_ALLOW_ADMIN, "1");
+  assert.equal(env.PATH, "/usr/bin");
+  assert.equal("PIHUB_LOCAL_ARCHIVE" in env, false);
+  assert.equal("AWS_SECRET_ACCESS_KEY" in env, false);
 });

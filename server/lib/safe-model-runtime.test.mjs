@@ -482,3 +482,19 @@ test("every auth route runtime disables custom models.json", () => {
   visit(authRoot);
   assert.deepEqual(violations, []);
 });
+
+test("extension process latches reset so per-session extension factories re-register", () => {
+  const latch = Symbol.for("magic-context.pi.active");
+  const globalScope = globalThis;
+  globalScope[latch] = true;
+  try {
+    runtimeSecurity.resetExtensionProcessLatches();
+    assert.equal(globalScope[latch], undefined);
+    assert.equal(latch in globalScope, false);
+    // Idempotent and safe when the latch was never set.
+    runtimeSecurity.resetExtensionProcessLatches();
+    assert.equal(latch in globalScope, false);
+  } finally {
+    delete globalScope[latch];
+  }
+});

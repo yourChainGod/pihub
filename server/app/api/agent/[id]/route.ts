@@ -43,7 +43,8 @@ export async function POST(
     promptAccepted = body.type === "prompt";
 
     return privateSessionJson({ success: true, data: result });
-  } catch {
+  } catch (error) {
+    console.error("[pihub] agent/[id] request failed:", error instanceof Error ? error.message : error);
     return privateSessionJson({
       error: "Agent request failed",
       ...(commandType === "prompt" && !promptAccepted

@@ -66,6 +66,44 @@ test("ordinary arguments enter the bundled Pi CLI while preserving the wrapper a
   assert.deepEqual(value.argv.slice(2), ["--version"]);
 });
 
+test("the standalone pi launcher reaches the bundled Pi CLI through an ESM import", (t) => {
+  const fixture = createFixture(t);
+  const launcher = path.join(fixture.root, "bin", "pi-launcher.mjs");
+  fs.writeFileSync(launcher, `
+process.env.PIHUB_STANDALONE_LAUNCHER = "1";
+await import(${JSON.stringify(fixture.entry)});
+`);
+  const output = path.join(fixture.root, `result-${Math.random().toString(16).slice(2)}.json`);
+  const result = spawnSync(process.execPath, [launcher, "--version"], {
+    encoding: "utf8",
+    env: { ...process.env, PIHUB_RUNTIME_TEST_OUTPUT: output },
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  // ESM import leaves require.main undefined; without the launcher marker the
+  // runtime entry stays inert and nothing is written at all.
+  assert.equal(JSON.parse(fs.readFileSync(output, "utf8")).kind, "pi");
+});
+
+test("an unmarked ESM import keeps the runtime entry inert", (t) => {
+  const fixture = createFixture(t);
+  const launcher = path.join(fixture.root, "bin", "bare-import.mjs");
+  fs.writeFileSync(launcher, `
+await import(${JSON.stringify(fixture.entry)});
+console.log("import-completed");
+`);
+  const result = spawnSync(process.execPath, [launcher], {
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /import-completed/);
+});
+
 test("forged or misplaced sentinels cannot enter the Server runtime", async (t) => {
   const fixture = createFixture(t);
   for (const args of [

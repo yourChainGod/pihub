@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowDown, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleHelp, Copy, Download, FileCode2, FileDown, FolderInput, FolderPlus,
+  ArrowDown, AtSign, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleAlert, CircleHelp, Copy, Download, FileCode2, FileDown, FolderInput, FolderPlus,
   Files, Folder, FolderGit2, GitBranch, HardDrive, ImagePlus, LoaderCircle, MessageSquareText,
   MoreHorizontal, Moon, Package, PanelLeftClose, PanelRightClose, Pencil, Plus, RefreshCw, Scissors, Search,
   Send, Settings2, ShieldAlert, Sparkles, Square, Sun, TerminalSquare, Trash2, Upload, Volume2, VolumeX, Wifi, Wrench, X,
 } from "lucide-react";
-import { autoNameRemoteSession, browseRemoteDirectories, compactRemoteSession, createRemoteFolderSession, createRemoteSession, createRemoteWorktree, deleteRemoteNewApiProvider, deleteRemoteSession, deleteRemoteWorktree, downloadRemoteFile, exportRemoteSession, forkRemoteSession, isTauriEnvironment, listDevices, loadRemoteAbsoluteFile, loadRemoteAgentState, loadRemoteDirectory, loadRemoteFile, loadRemoteFiles, loadRemoteGit, loadRemoteGitDiff, loadRemoteModels, loadRemoteModelsConfig, loadRemoteNewApi, loadRemoteRunning, loadRemoteSession, loadRemoteSessions, loadRemoteThinking, loadRemoteWorktrees, navigateRemoteTree, notifyDone, refreshRemoteNewApiProvider, remoteAgentEventMatchesDevice, remoteAgentStreamKey, remoteFileAction, renameRemoteSession, saveRemoteModelsConfig, saveRemoteNewApiProvider, sendRemoteAgentCommand, sendRemotePrompt, startRemoteAgentStream, steerRemotePrompt, stopRemoteAgent, stopRemoteAgentStream, uploadRemoteCheck, uploadRemoteFiles } from "./lib";
-import type { AttachedImage, Device, RemoteAgentEventPayload, RemoteAgentState, RemoteContextUsage, RemoteDirectoryBrowse, RemoteDirectoryListing, RemoteFilePreview, RemoteGitDiff, RemoteGitStatus, RemoteModelsResponse, RemoteNewApiConfig, RemoteSession, RemoteUiRequest, RemoteWorktree, RemoteWorktrees, SessionDetail, SessionMessage, SessionTokenStats, SessionTreeNode } from "./types";
+import { autoNameRemoteSession, browseRemoteDirectories, compactRemoteSession, createRemoteFolderSession, createRemoteSession, createRemoteWorktree, deleteRemoteNewApiProvider, deleteRemoteSession, deleteRemoteWorktree, downloadRemoteFile, exportRemoteSession, forkRemoteSession, isTauriEnvironment, listDevices, loadRemoteAbsoluteFile, loadRemoteAgentState, loadRemoteDirectory, loadRemoteFile, loadRemoteFileMatches, loadRemoteFiles, loadRemoteGit, loadRemoteGitDiff, loadRemoteModels, loadRemoteModelsConfig, loadRemoteNewApi, loadRemoteRunning, loadRemoteSession, loadRemoteSessions, loadRemoteThinking, loadRemoteWorktrees, navigateRemoteTree, notifyDone, refreshRemoteNewApiProvider, remoteAgentEventMatchesDevice, remoteAgentStreamKey, remoteFileAction, renameRemoteSession, saveRemoteModelsConfig, saveRemoteNewApiProvider, sendRemoteAgentCommand, sendRemotePrompt, startRemoteAgentStream, steerRemotePrompt, stopRemoteAgent, stopRemoteAgentStream, uploadRemoteCheck, uploadRemoteFiles } from "./lib";
+import type { AttachedImage, Device, RemoteAgentEventPayload, RemoteAgentState, RemoteContextUsage, RemoteDirectoryBrowse, RemoteDirectoryListing, RemoteFilePreview, RemoteGitDiff, RemoteGitStatus, RemoteModelsResponse, RemoteNewApiConfig, RemoteSession, RemoteUiRequest, RemoteWidgetItem, RemoteWorktree, RemoteWorktrees, SessionDetail, SessionMessage, SessionTokenStats, SessionTreeNode } from "./types";
 import { isDesktopWindowFullscreen, listenDesktopEvent, onDesktopWindowResized, startDesktopWindowDragging } from "./desktopTransport";
 import { cacheKey, deleteCachedSession, peekSession, readCachedSession, writeCachedSession } from "./sessionCache";
+import { peekResource, readCachedResource, writeCachedResource } from "./resourceCache";
 import ConversationMessages, { Markdown } from "./MessageView";
 import ChatMinimap from "./ChatMinimap";
 import { ConfirmDialog, NamePromptDialog, useDialogFocus } from "./dialogs";
@@ -101,12 +102,31 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   const [slashCommands, setSlashCommands] = useState<Array<{ name: string; description?: string; source?: string }> | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
+  const [composerCursor, setComposerCursor] = useState(0);
+  const [mentionItems, setMentionItems] = useState<string[]>([]);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionDismissed, setMentionDismissed] = useState(false);
+  const fileIndexRef = useRef<{ cwd: string; files: string[] } | null>(null);
+  // Sent-prompt history per session (pi-app composer pattern): ArrowUp on an
+  // empty composer walks back through it, any edit resets the walk.
+  const promptHistoryRef = useRef(new Map<string, string[]>());
+  const historyWalkRef = useRef<{ sessionId: string; index: number } | null>(null);
   const [toolPreset, setToolPreset] = useState<string>("default");
   const [askQueue, setAskQueue] = useState<Array<{ sessionId: string; request: RemoteUiRequest }>>([]);
+  // Extension custom UIs (e.g. pi-ask's selector): keyed by UI request id.
+  const [customUis, setCustomUis] = useState<Map<string, { sessionId: string; lines: string[] }>>(new Map());
+  // Extension widgets (e.g. pi-todo-rail's todo bar): per-session, keyed by widgetKey.
+  const widgetsRef = useRef(new Map<string, Map<string, RemoteWidgetItem>>());
+  const [widgets, setWidgets] = useState<Map<string, RemoteWidgetItem>>(new Map());
   const searchRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const composerSelectRef = useRef<HTMLDivElement>(null);
   const messageScrollRef = useRef<HTMLDivElement>(null);
+  // Scroll intents are recorded at store time and applied in a layout effect
+  // after React commits — a rAF right after setState races the commit and
+  // measures stale heights, which broke bottom-follow and prepend anchoring.
+  const followBottomRef = useRef(false);
+  const prependHeightRef = useRef<number | null>(null);
   // Per-session scroll memory: recorded on scroll, restored once on switch.
   const scrollPositionsRef = useRef(new Map<string, number>());
   const pendingRestoreRef = useRef<{ session: string; top: number | null } | null>(null);
@@ -122,19 +142,33 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   const selected = sessions.find((session) => session.id === selectedId);
   const isRunning = selectedId ? running.has(selectedId) : false;
 
-  function updateDraft(next: string): void {
+  const updateDraft = useCallback((next: string): void => {
     draftRef.current = next;
     setDraft(next);
     const owner = draftOwnerRef.current;
     if (!owner) return;
     if (next) draftsRef.current.set(owner, next);
     else draftsRef.current.delete(owner);
-  }
+  }, []);
 
   // Sessions created via ensure_session have no .jsonl until the first prompt,
   // and the server deliberately hides such idle runtimes from /api/sessions.
   // Keep them listed locally so the sidebar row and tab appear immediately.
   const pendingSessionsRef = useRef(new Map<string, RemoteSession>());
+  // Sessions we just sent a prompt to, before the server's /api/agent/running
+  // catches up. The 2.5s poll replaces the running set wholesale, so without
+  // this grace window the status flickers 运行中 → 空闲 → 运行中 on every send.
+  const pendingRunsRef = useRef(new Map<string, number>());
+  const mergePendingRuns = useCallback((ids: Iterable<string>) => {
+    const pending = pendingRunsRef.current;
+    const now = Date.now();
+    const merged = new Set(ids);
+    for (const [id, deadline] of [...pending]) {
+      if (deadline <= now) pending.delete(id);
+      else merged.add(id);
+    }
+    return merged;
+  }, []);
   const mergePendingSessions = useCallback((list: RemoteSession[]) => {
     const pending = pendingSessionsRef.current;
     for (const id of [...pending.keys()]) if (list.some((session) => session.id === id)) pending.delete(id);
@@ -143,42 +177,75 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
 
   const refreshSessions = useCallback(async (target: Device) => {
     try {
+      const cacheKey = `${target.id}:sessions`;
+      // Try cache first
+      const cached = peekResource(cacheKey);
+      if (cached && typeof cached === "object" && "sessions" in cached) {
+        const data = cached as { sessions: RemoteSession[]; runningSessionIds: string[] };
+        setSessions(mergePendingSessions(data.sessions));
+        setRunning(mergePendingRuns(data.runningSessionIds));
+        setSelectedId((current) => current ?? data.sessions[0]?.id ?? null);
+        setLoading(false);
+      }
+      // Fetch fresh data
       const data = await loadRemoteSessions(target);
+      writeCachedResource(cacheKey, data);
       setSessions(mergePendingSessions(data.sessions));
-      setRunning(new Set(data.runningSessionIds));
+      setRunning(mergePendingRuns(data.runningSessionIds));
       setSelectedId((current) => current ?? data.sessions[0]?.id ?? null);
       setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally { setLoading(false); }
-  }, [mergePendingSessions]);
+  }, [mergePendingSessions, mergePendingRuns]);
 
   const refreshSessionsQuiet = useCallback(async (target: Device) => {
     try {
       const data = await loadRemoteSessions(target);
+      writeCachedResource(`${target.id}:sessions`, data);
       setSessions(mergePendingSessions(data.sessions));
-      setRunning(new Set(data.runningSessionIds));
+      setRunning(mergePendingRuns(data.runningSessionIds));
     } catch { /* keep last reliable state */ }
-  }, [mergePendingSessions]);
+  }, [mergePendingSessions, mergePendingRuns]);
 
   const storeDetail = useCallback((target: Device, sessionId: string, next: SessionDetail) => {
     writeCachedSession(cacheKey(target.id, sessionId), next);
     if (selectedIdRef.current === sessionId) {
       const scroll = messageScrollRef.current;
-      const follow = !scroll || scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 140;
+      followBottomRef.current = !scroll || scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 140;
       detailRef.current = next; setDetail(next);
-      if (follow) requestAnimationFrame(() => { const current = messageScrollRef.current; if (current) current.scrollTop = current.scrollHeight; });
     }
   }, []);
 
-  const refreshDetail = useCallback(async (target: Device, sessionId: string, quiet = false, limit = 40): Promise<SessionDetail | null> => {
+  const refreshDetail = useCallback(async (target: Device, sessionId: string, quiet = false, limit = 40, incremental = false): Promise<SessionDetail | null> => {
     if (!quiet) setDetailLoading(true);
     try {
-      const fetched = await loadRemoteSession(target, sessionId, limit);
+      const key = cacheKey(target.id, sessionId);
+      const cached = peekSession(key);
+      // Incremental catch-up: with a cached transcript, ask only for entries
+      // after the last known entry id instead of re-pulling the whole window.
+      const anchor = incremental
+        ? [...(cached?.context.entryIds ?? [])].reverse().find((id): id is string => typeof id === "string" && id.length > 0)
+        : undefined;
+      let fetched = await loadRemoteSession(target, sessionId, limit, anchor);
       // The Rust client maps a non-JSON 200 body (e.g. server mid-restart) to
       // null; without this guard the merge below throws an opaque TypeError.
       if (!fetched || typeof fetched !== "object" || !Array.isArray(fetched.context?.messages)) throw new Error("远端返回了空响应（服务可能在重启中），请稍后重试");
-      const cached = peekSession(cacheKey(target.id, sessionId));
+      if (anchor && cached && fetched.context.incremental && !fetched.context.reset) {
+        const messages = [...cached.context.messages, ...fetched.context.messages];
+        const entryIds = [...(cached.context.entryIds ?? []), ...(fetched.context.entryIds ?? [])];
+        fetched = {
+          ...fetched,
+          context: {
+            ...fetched.context,
+            messages,
+            entryIds,
+            truncated: cached.context.truncated ?? false,
+            totalMessages: Math.max(fetched.context.totalMessages ?? 0, messages.length),
+          },
+          ...(fetched.info ? { info: { ...fetched.info, messageCount: messages.length } } : {}),
+        };
+      }
       // Keep local optimistic/streaming messages while a background history page arrives.
       const local = cached?.context.messages ?? [];
       const remoteKeys = new Set(fetched.context.messages.map((message) => `${message.role}:${message.timestamp ?? ""}:${JSON.stringify(message.content).slice(0, 80)}`));
@@ -230,8 +297,80 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     };
   }, [device]);
 
+  // Backward paging: prepend one page of entries older than the oldest loaded
+  // entry. Returns true while more history remains. Based on the live cache on
+  // every call so concurrent streaming never gets clobbered.
+  const prependOlder = useCallback(async (target: Device, sessionId: string): Promise<boolean> => {
+    const key = cacheKey(target.id, sessionId);
+    const cached = peekSession(key);
+    if (!cached?.context.truncated) return false;
+    const firstId = (cached.context.entryIds ?? []).find((id): id is string => typeof id === "string" && id.length > 0);
+    if (!firstId) return false;
+    const page = await loadRemoteSession(target, sessionId, 120, undefined, firstId);
+    if (!page || typeof page !== "object" || !Array.isArray(page.context?.messages)) return false;
+    if (page.context.reset) {
+      // History was rewritten (compaction/branch jump): take a fresh window
+      // at least as large as what the user already sees.
+      await refreshDetail(target, sessionId, true, Math.max(cached.context.messages.length, 40));
+      return false;
+    }
+    const latest = peekSession(key) ?? cached;
+    const currentIds = new Set((latest.context.entryIds ?? []).filter(Boolean));
+    const freshMessages: typeof latest.context.messages = [];
+    const freshIds: string[] = [];
+    for (let index = 0; index < page.context.messages.length; index += 1) {
+      const id = page.context.entryIds[index];
+      if (id && currentIds.has(id)) continue;
+      freshMessages.push(page.context.messages[index]);
+      freshIds.push(id);
+    }
+    if (!freshMessages.length) return Boolean(page.context.truncated);
+    // Keep the viewport anchored: prepending shifts every row down by the
+    // height of the new page, so compensate scrollTop by that delta. Recorded
+    // here, applied post-commit in the layout effect below.
+    const scroll = selectedIdRef.current === sessionId ? messageScrollRef.current : null;
+    if (scroll && scroll.scrollTop > 0) {
+      prependHeightRef.current = scroll.scrollHeight;
+      followBottomRef.current = false;
+    }
+    storeDetail(target, sessionId, {
+      ...latest,
+      context: {
+        ...latest.context,
+        messages: [...freshMessages, ...latest.context.messages],
+        entryIds: [...freshIds, ...latest.context.entryIds],
+        truncated: page.context.truncated ?? false,
+        totalMessages: page.context.totalMessages,
+      },
+    });
+    return Boolean(page.context.truncated);
+  }, [storeDetail, refreshDetail]);
+
+  // Silent background backfill: after the tail of a session is on screen, keep
+  // paging backward until the whole history is local. Once per session.
+  // Very large sessions (40k+ messages) would need hundreds of pages — skip
+  // the auto-backfill there; the manual "加载更早" button still pages on demand.
+  const BACKFILL_MAX_MESSAGES = 2400;
+  const backfillingRef = useRef(new Set<string>());
+  const backfillHistory = useCallback((target: Device, sessionId: string) => {
+    const key = cacheKey(target.id, sessionId);
+    if (backfillingRef.current.has(key)) return;
+    const total = peekSession(key)?.context.totalMessages ?? 0;
+    if (total > BACKFILL_MAX_MESSAGES) return;
+    backfillingRef.current.add(key);
+    void (async () => {
+      try {
+        for (let page = 0; page < 80; page += 1) {
+          const more = await prependOlder(target, sessionId);
+          if (!more) break;
+        }
+      } catch { /* best-effort background backfill */ }
+      finally { backfillingRef.current.delete(key); }
+    })();
+  }, [prependOlder]);
+
   useEffect(() => {
-    if (!device || !selectedId) { setDetail(null); return; }
+    if (!device || !selectedId) { detailRef.current = null; setDetail(null); return; }
     pendingRestoreRef.current = { session: selectedId, top: scrollPositionsRef.current.get(selectedId) ?? null };
     let alive = true;
     const key = cacheKey(device.id, selectedId);
@@ -240,44 +379,63 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
       detailRef.current = immediate; setDetail(immediate); setDetailLoading(false);
       if (!hydratedSessionsRef.current.has(key)) {
         hydratedSessionsRef.current.add(key);
-        void refreshDetail(device, selectedId, true, 120).then((next) => {
-          if (next?.context.truncated && (next.context.totalMessages ?? 0) > 120) void refreshDetail(device, selectedId, true, 500);
-        });
+        // Incremental catch-up forward, then silently backfill older history.
+        void refreshDetail(device, selectedId, true, 120, true)
+          .then(() => backfillHistory(device, selectedId));
       }
       return;
     }
-    setDetail(null); setDetailLoading(true);
+    detailRef.current = null; setDetail(null); setDetailLoading(true);
     void readCachedSession(key).then((cached) => {
       if (!alive || selectedIdRef.current !== selectedId) return;
       if (cached) {
         detailRef.current = cached; setDetail(cached); setDetailLoading(false);
         hydratedSessionsRef.current.add(key);
-        void refreshDetail(device, selectedId, true, 120).then((next) => {
-          if (next?.context.truncated && (next.context.totalMessages ?? 0) > 120) void refreshDetail(device, selectedId, true, 500);
-        });
+        void refreshDetail(device, selectedId, true, 120, true)
+          .then(() => backfillHistory(device, selectedId));
       } else {
         hydratedSessionsRef.current.add(key);
-        void refreshDetail(device, selectedId).then((next) => {
-          if (next?.context.truncated && (next.context.totalMessages ?? 0) > 40) void refreshDetail(device, selectedId, true, 120).then((more) => {
-            if (more?.context.truncated && (more.context.totalMessages ?? 0) > 120) void refreshDetail(device, selectedId, true, 500);
-          });
-        });
+        void refreshDetail(device, selectedId)
+          .then(() => backfillHistory(device, selectedId));
       }
     });
     return () => { alive = false; };
-  }, [device, selectedId, refreshDetail]);
+  }, [device, selectedId, refreshDetail, backfillHistory]);
 
   // Restore the remembered scroll position once the switched session renders;
-  // no record means first open → jump to the latest messages.
+  // no record means first open → jump to the latest messages. The detail state
+  // still holds the previous session for one commit after a switch — wait for
+  // the frame where the committed detail is the one detailRef just adopted,
+  // otherwise the pending restore would be consumed against the old session.
   useEffect(() => {
     const pending = pendingRestoreRef.current;
     if (!pending || !detail || pending.session !== selectedId) return;
+    if (detailRef.current !== detail) return;
     pendingRestoreRef.current = null;
     requestAnimationFrame(() => {
       const el = messageScrollRef.current;
       if (el) el.scrollTop = pending.top ?? el.scrollHeight;
     });
   }, [detail, selectedId]);
+
+  // Apply recorded scroll intents against the committed DOM: prepend
+  // compensation wins over bottom-follow (a prepend is never a reason to jump).
+  useLayoutEffect(() => {
+    if (!detail) return;
+    const el = messageScrollRef.current;
+    if (!el) return;
+    const previousHeight = prependHeightRef.current;
+    if (previousHeight !== null) {
+      prependHeightRef.current = null;
+      followBottomRef.current = false;
+      el.scrollTop += el.scrollHeight - previousHeight;
+      return;
+    }
+    if (followBottomRef.current && !pendingRestoreRef.current) {
+      followBottomRef.current = false;
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [detail]);
 
   const shortcutActionsRef = useRef<{ create: () => void; close: (id: string) => void }>({ create: () => {}, close: () => {} });
   shortcutActionsRef.current = { create: () => void createSession(), close: (id: string) => closeTab(id) };
@@ -311,7 +469,24 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   useEffect(() => {
     if (!device || !selected?.cwd) return;
     let alive = true;
-    void loadRemoteModels(device, selected.cwd).then((value) => alive && setModels(value)).catch((cause) => alive && setError(cause instanceof Error ? cause.message : String(cause)));
+    const cacheKey = `${device.id}:${selected.cwd}:models`;
+    // Try cache first
+    void (async () => {
+      const cached = await readCachedResource(cacheKey);
+      if (alive && cached && typeof cached === "object") {
+        setModels(cached as RemoteModelsResponse);
+      }
+      // Fetch fresh data in background
+      try {
+        const value = await loadRemoteModels(device, selected.cwd);
+        if (alive) {
+          writeCachedResource(cacheKey, value);
+          setModels(value);
+        }
+      } catch (cause) {
+        if (alive && !cached) setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    })();
     return () => { alive = false; };
   }, [device, selected?.cwd]);
 
@@ -349,10 +524,22 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
 
   const toolsSyncedRef = useRef(new Set<string>());
 
+  const publishWidgets = useCallback((sessionId: string) => {
+    if (selectedIdRef.current === sessionId) setWidgets(new Map(widgetsRef.current.get(sessionId) ?? new Map()));
+  }, []);
+
   const refreshAgentState = useCallback(async (target: Device, sessionId: string) => {
     try {
       const result = await loadRemoteAgentState(target, sessionId);
       if (selectedIdRef.current === sessionId) setAgentState(result.running ? result.state ?? null : null);
+      // Widget events only fire when they change; the get_state snapshot is the
+      // recovery path for SSE reconnects and session switches. An absent field
+      // (older server) keeps the event-driven state; a present array (even
+      // empty) is authoritative. A stopped session drops its widgets.
+      const snapshot = result.running ? result.state?.extensionWidgets : undefined;
+      if (snapshot) widgetsRef.current.set(sessionId, new Map(snapshot.map((item) => [item.key, item])));
+      else if (!result.running) widgetsRef.current.delete(sessionId);
+      publishWidgets(sessionId);
       // Once a wrapper is live, sync the active tool preset from get_tools.
       if (result.running && !toolsSyncedRef.current.has(sessionId)) {
         toolsSyncedRef.current.add(sessionId);
@@ -364,13 +551,13 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
           .catch(() => toolsSyncedRef.current.delete(sessionId));
       }
     } catch { /* state endpoint is best-effort */ }
-  }, []);
+  }, [publishWidgets]);
 
   useEffect(() => {
     if (!device) return;
     const timer = window.setInterval(async () => {
       try {
-        const ids = await loadRemoteRunning(device); setRunning(new Set(ids));
+        const ids = await loadRemoteRunning(device); setRunning(mergePendingRuns(ids));
         for (const id of ids) {
           const streamKey = remoteAgentStreamKey(device, id);
           if (streamSessionsRef.current.has(streamKey)) continue;
@@ -386,10 +573,11 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
       } catch { /* keep last reliable state */ }
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [device, refreshAgentState]);
+  }, [device, refreshAgentState, mergePendingRuns]);
 
   useEffect(() => {
     setAgentState(null); setStatsOpen(false); setSessionMenu(false); setCompactResult(null); setImages([]);
+    setWidgets(new Map(widgetsRef.current.get(selectedId ?? "") ?? new Map()));
     if (device && selectedId) void refreshAgentState(device, selectedId);
   }, [device, selectedId, refreshAgentState]);
 
@@ -402,6 +590,77 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     if (!isTauriEnvironment()) return;
     let disposed = false;
     let dispose: (() => void) | undefined;
+    // message_update deltas can arrive dozens of times per second; applying each
+    // one synchronously re-renders the whole conversation and collapses any in
+    // progress text selection. Batch them per session and flush once per frame.
+    const pendingDeltas = new Map<string, Record<string, unknown>[]>();
+    let flushFrame = 0;
+    const extras = {
+      onSettled: (sessionId: string) => {
+        if (soundRef.current) playDoneSound();
+        if (!document.hasFocus()) {
+          const name = sessionsRef.current.find((session) => session.id === sessionId)?.name || "会话";
+          void notifyDone(`${name} · 运行完成`, "Pi 任务已结束，点击查看结果");
+        }
+        if (selectedIdRef.current !== sessionId) setDoneIds((current) => new Set(current).add(sessionId));
+        if (selectedIdRef.current === sessionId && deviceRef.current) void refreshAgentState(deviceRef.current, sessionId);
+        if (deviceRef.current) void refreshSessionsQuiet(deviceRef.current);
+      },
+      onStreamReset: (sessionId: string) => {
+        // The server reported a replay gap (dropped connection or restart);
+        // re-pull the snapshot so finalized messages are never lost.
+        if (deviceRef.current) void refreshDetail(deviceRef.current, sessionId, true);
+      },
+      onRunningKnown: (sessionId: string) => {
+        pendingRunsRef.current.delete(sessionId);
+      },
+      onUiRequest: (sessionId: string, request: RemoteUiRequest) => {
+        if (request.method === "notify") {
+          setNotice(request.message || "扩展通知");
+          return;
+        }
+        if (request.method === "setWidget" && request.widgetKey) {
+          const map = widgetsRef.current.get(sessionId) ?? new Map<string, RemoteWidgetItem>();
+          if (request.widgetLines === undefined) map.delete(request.widgetKey);
+          else map.set(request.widgetKey, { key: request.widgetKey, lines: request.widgetLines, placement: request.widgetPlacement });
+          widgetsRef.current.set(sessionId, map);
+          publishWidgets(sessionId);
+          return;
+        }
+        if (request.method === "set_editor_text" && typeof request.text === "string") {
+          // Only touch the visible composer; drafts for other sessions stay put.
+          if (selectedIdRef.current === sessionId) {
+            updateDraft(request.text);
+            composerRef.current?.focus();
+          }
+          return;
+        }
+        // setTitle is intentionally ignored: the desktop window owns its title.
+        if (request.method === "custom") {
+          // Headless custom UI frame (e.g. pi-ask): replace lines, drop on close.
+          setCustomUis((current) => {
+            const next = new Map(current);
+            if (request.closed) next.delete(request.id);
+            else next.set(request.id, { sessionId, lines: request.lines ?? [] });
+            return next;
+          });
+          return;
+        }
+        if (["select", "confirm", "input", "editor"].includes(request.method)) {
+          setAskQueue((queue) => [...queue, { sessionId, request }]);
+        }
+      },
+    };
+    const applyEvent = (target: Device, sessionId: string, event: Record<string, unknown>) => {
+      applyAgentEvent(target, sessionId, event, storeDetail, setRunning, streamSessionsRef.current, extras);
+    };
+    const flushDeltas = (target: Device) => {
+      flushFrame = 0;
+      for (const [sessionId, events] of [...pendingDeltas]) {
+        pendingDeltas.delete(sessionId);
+        for (const event of events) applyEvent(target, sessionId, event);
+      }
+    };
     void listenDesktopEvent<RemoteAgentEventPayload>("pihub-agent-event", (payload) => {
       const target = deviceRef.current;
       if (!target || !remoteAgentEventMatchesDevice(payload, target)) return;
@@ -409,30 +668,27 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
       const knownGeneration = streamGenerationsRef.current.get(streamKey) ?? 0;
       if (payload.generation < knownGeneration) return;
       streamGenerationsRef.current.set(streamKey, payload.generation);
-      applyAgentEvent(target, payload.sessionId, payload.event, storeDetail, setRunning, streamSessionsRef.current, {
-        onSettled: (sessionId) => {
-          if (soundRef.current) playDoneSound();
-          if (!document.hasFocus()) {
-            const name = sessionsRef.current.find((session) => session.id === sessionId)?.name || "会话";
-            void notifyDone(`${name} · 运行完成`, "Pi 任务已结束，点击查看结果");
-          }
-          if (selectedIdRef.current !== sessionId) setDoneIds((current) => new Set(current).add(sessionId));
-          if (selectedIdRef.current === sessionId) void refreshAgentState(target, sessionId);
-          void refreshSessionsQuiet(target);
-        },
-        onUiRequest: (sessionId, request) => {
-          if (request.method === "notify") {
-            setNotice(request.message || "扩展通知");
-            return;
-          }
-          if (["select", "confirm", "input", "editor"].includes(request.method)) {
-            setAskQueue((queue) => [...queue, { sessionId, request }]);
-          }
-        },
-      });
+      if (payload.event.type === "message_update") {
+        const queue = pendingDeltas.get(payload.sessionId) ?? [];
+        queue.push(payload.event);
+        pendingDeltas.set(payload.sessionId, queue);
+        if (!flushFrame) flushFrame = requestAnimationFrame(() => flushDeltas(target));
+        return;
+      }
+      // Keep event order: queued deltas must be applied before any other event.
+      const queued = pendingDeltas.get(payload.sessionId);
+      if (queued) {
+        pendingDeltas.delete(payload.sessionId);
+        for (const event of queued) applyEvent(target, payload.sessionId, event);
+      }
+      applyEvent(target, payload.sessionId, payload.event);
     }).then((unlisten) => { if (disposed) unlisten(); else dispose = unlisten; });
-    return () => { disposed = true; dispose?.(); };
-  }, [storeDetail, refreshAgentState, refreshSessionsQuiet]);
+    return () => {
+      disposed = true; dispose?.();
+      if (flushFrame) cancelAnimationFrame(flushFrame);
+      pendingDeltas.clear();
+    };
+  }, [storeDetail, refreshAgentState, refreshSessionsQuiet, refreshDetail, publishWidgets, updateDraft]);
 
   useEffect(() => {
     if (!notice) return;
@@ -485,6 +741,8 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   })).filter((project) => project.name.toLowerCase().includes(query.toLowerCase()) || project.sessions.length), [projects, query]);
 
   const stats = useMemo<SessionTokenStats | null>(() => computeSessionStats(detail?.context.messages ?? []), [detail]);
+  const aboveWidgets = useMemo(() => [...widgets.values()].filter((item) => (item.placement ?? "aboveEditor") === "aboveEditor"), [widgets]);
+  const belowWidgets = useMemo(() => [...widgets.values()].filter((item) => item.placement === "belowEditor"), [widgets]);
   const contextUsage: RemoteContextUsage | null = agentState?.contextUsage ?? null;
   const isCompacting = Boolean(agentState?.isCompacting) || compactBusy;
   const branches = useMemo(() => collectBranches(detail?.tree ?? [], detail?.leafId ?? null), [detail]);
@@ -495,18 +753,99 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     if (slashQuery === null) return [];
     return [...BUILTIN_SLASH_COMMANDS, ...(slashCommands ?? [])]
       .filter((item) => item.name.toLowerCase().includes(slashQuery) || (item.description ?? "").toLowerCase().includes(slashQuery))
-      .slice(0, 8);
+      .slice(0, 12);
   }, [slashQuery, slashCommands]);
   const slashOpen = slashQuery !== null && !slashDismissed && slashItems.length > 0;
 
   useEffect(() => {
+    if (!slashOpen) return;
+    document.querySelector(".slash-menu [data-slash-active]")?.scrollIntoView({ block: "nearest" });
+  }, [slashIndex, slashOpen]);
+
+  /* @ file mention: completes relative paths from the remote file index. The
+     inserted text stays plain `@path` — the agent resolves it against cwd. */
+  const mention = useMemo(() => {
+    if (slashQuery !== null) return null;
+    const before = draft.slice(0, composerCursor);
+    const match = /(^|\s)@"?([^\s@"]*)$/.exec(before);
+    if (!match || match[2].length > 120) return null;
+    return { start: composerCursor - (match[0].length - match[1].length), query: match[2] };
+  }, [draft, composerCursor, slashQuery]);
+
+  useEffect(() => {
+    fileIndexRef.current = null;
+    if (!device || !selected?.cwd) return;
+    let alive = true;
+    const cwd = selected.cwd;
+    void loadRemoteFiles(device, cwd).then((files) => { if (alive) fileIndexRef.current = { cwd, files }; }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [device, selected?.cwd]);
+
+  useEffect(() => {
+    setMentionIndex(0);
+    if (!mention || mentionDismissed || !device || !selected?.cwd) { setMentionItems([]); return; }
+    const cwd = selected.cwd;
+    const index = fileIndexRef.current;
+    // The unfiltered index is capped server-side; once it hits the cap, defer
+    // to the server's fuzzy search instead of filtering a truncated list.
+    if (index && index.cwd === cwd && index.files.length < 5000) {
+      const query = mention.query.toLowerCase();
+      setMentionItems(index.files.filter((file) => file.toLowerCase().includes(query)).slice(0, 8));
+      return;
+    }
+    let alive = true;
+    const handle = window.setTimeout(() => {
+      void loadRemoteFileMatches(device, cwd, mention.query)
+        .then((files) => { if (alive) setMentionItems(files.slice(0, 8)); })
+        .catch(() => { if (alive) setMentionItems([]); });
+    }, 150);
+    return () => { alive = false; window.clearTimeout(handle); };
+  }, [mention, mentionDismissed, device, selected?.cwd]);
+
+  const mentionOpen = mention !== null && !mentionDismissed && mentionItems.length > 0;
+
+  function applyMention(path: string) {
+    if (!mention) return;
+    const quoted = quoteMention(path);
+    const caret = mention.start + quoted.length;
+    updateDraft(`${draft.slice(0, mention.start)}${quoted}${draft.slice(composerCursor)}`);
+    setMentionDismissed(true);
+    setMentionItems([]);
+    composerRef.current?.focus();
+    requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (el) { el.setSelectionRange(caret, caret); setComposerCursor(caret); }
+    });
+  }
+
+  // The file panel references files by path relative to the session cwd.
+  const insertMention = useCallback((relativePath: string) => {
+    const current = draftRef.current.trimEnd();
+    updateDraft(current ? `${current} ${quoteMention(relativePath)}` : quoteMention(relativePath));
+    composerRef.current?.focus();
+  }, [updateDraft]);
+
+  useEffect(() => {
     if (slashQuery === null || slashCommands !== null || !device || !selectedId) return;
-    sendRemoteAgentCommand(device, selectedId, { type: "get_commands" })
-      .then((envelope) => {
+    const cacheKey = `${device.id}:${selectedId}:slash-commands`;
+    // Try cache first
+    void (async () => {
+      const cached = await readCachedResource(cacheKey);
+      if (cached && Array.isArray(cached)) {
+        setSlashCommands(cached as Array<{ name: string; description?: string; source?: string }>);
+      }
+      // Fetch fresh data in background
+      try {
+        const envelope = await sendRemoteAgentCommand(device, selectedId, { type: "get_commands" });
         const commands = (envelope as { data?: { commands?: Array<{ name: string; description?: string; source?: string }> } })?.data?.commands;
-        if (Array.isArray(commands)) setSlashCommands(commands);
-      })
-      .catch(() => setSlashCommands([]));
+        if (Array.isArray(commands)) {
+          writeCachedResource(cacheKey, commands);
+          setSlashCommands(commands);
+        }
+      } catch {
+        if (!cached) setSlashCommands([]);
+      }
+    })();
   }, [slashQuery, slashCommands, device, selectedId]);
 
   useEffect(() => { setSlashCommands(null); setToolPreset("default"); }, [selectedId]);
@@ -530,7 +869,9 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
         setNotice("正在重载会话资源…");
         try {
           await sendRemoteAgentCommand(device, selectedId, { type: "reload" });
-          await refreshDetail(device, selectedId, true);
+          // Keep the currently loaded window size — a reload must not shrink
+          // the transcript the user is reading back to the default page.
+          await refreshDetail(device, selectedId, true, Math.max(detailRef.current?.context.messages.length ?? 40, 40));
           if (selected?.cwd) await loadRemoteModels(device, selected.cwd).then(setModels).catch(() => undefined);
           setNotice("会话资源已重载");
         } catch (cause) { setNotice(""); setError(cause instanceof Error ? cause.message : String(cause)); }
@@ -548,6 +889,29 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
         if (!textOut) { setError("没有可复制的助手回复"); return true; }
         await navigator.clipboard.writeText(textOut);
         setNotice("已复制上一条助手回复");
+        return true;
+      }
+      case "new":
+        await createSession();
+        return true;
+      case "export":
+        await exportSession();
+        return true;
+      case "title":
+        await autoNameSession();
+        return true;
+      case "session":
+        setStatsOpen(true);
+        return true;
+      case "stop":
+        if (isRunning) { await stopRemoteAgent(device, selectedId); setNotice("已发送中断信号"); }
+        else setNotice("当前没有运行中的任务");
+        return true;
+      case "fork": {
+        const ids = detailRef.current?.context.entryIds ?? [];
+        const lastId = ids[ids.length - 1];
+        if (!lastId) { setError("暂无可分叉的消息位置"); return true; }
+        await forkFromEntry(lastId);
         return true;
       }
       default:
@@ -588,6 +952,9 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     const optimistic: SessionMessage = { role: "user", content: optimisticContent.length === 1 && message ? message : optimisticContent, timestamp: Date.now(), pihubOptimistic: true };
     const current = detailRef.current;
     if (current) storeDetail(device, selectedId, { ...current, context: { ...current.context, messages: [...current.context.messages, optimistic] } });
+    // Mark the run locally until the server's running list catches up (agent_start
+    // or the next poll) — clears the 运行中→空闲→运行中 flicker on every send.
+    pendingRunsRef.current.set(selectedId, Date.now() + 30_000);
     setRunning((value) => new Set(value).add(selectedId));
     try {
       const streamKey = remoteAgentStreamKey(device, selectedId);
@@ -603,16 +970,44 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
       }
       if (isRunning) await steerRemotePrompt(device, selectedId, message, attachments);
       else await sendRemotePrompt(device, selectedId, message, attachments);
+      if (message) {
+        const history = promptHistoryRef.current.get(selectedId) ?? [];
+        if (history[history.length - 1] !== message) promptHistoryRef.current.set(selectedId, [...history, message].slice(-50));
+      }
+      historyWalkRef.current = null;
     } catch (cause) {
       const streamKey = remoteAgentStreamKey(device, selectedId);
       streamSessionsRef.current.delete(streamKey);
       streamGenerationsRef.current.delete(streamKey);
       void stopRemoteAgentStream(device, selectedId);
       if (current) storeDetail(device, selectedId, current);
+      pendingRunsRef.current.delete(selectedId);
       setRunning((value) => { const next = new Set(value); next.delete(selectedId); return next; });
       updateDraft(message); setImages(attachments); setError(cause instanceof Error ? cause.message : String(cause));
     }
     finally { setSending(false); }
+  }
+
+  async function resumeInterrupted() {
+    if (!device || !selectedId) return;
+    setSessions((current) => current.map((session) => (session.id === selectedId ? { ...session, interrupted: false } : session)));
+    pendingRunsRef.current.set(selectedId, Date.now() + 30_000);
+    setRunning((value) => new Set(value).add(selectedId));
+    try {
+      const streamKey = remoteAgentStreamKey(device, selectedId);
+      if (!streamSessionsRef.current.has(streamKey)) {
+        streamSessionsRef.current.add(streamKey);
+        try {
+          const generation = await startRemoteAgentStream(device, selectedId);
+          streamGenerationsRef.current.set(streamKey, Math.max(generation, streamGenerationsRef.current.get(streamKey) ?? 0));
+        } catch { streamSessionsRef.current.delete(streamKey); }
+      }
+      await sendRemotePrompt(device, selectedId, "继续");
+    } catch (cause) {
+      pendingRunsRef.current.delete(selectedId);
+      setRunning((value) => { const next = new Set(value); next.delete(selectedId); return next; });
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   async function pickImages(files: FileList | null) {
@@ -620,7 +1015,7 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     const next: AttachedImage[] = [];
     for (const file of Array.from(files).slice(0, 6)) {
       if (!file.type.startsWith("image/")) continue;
-      if (file.size > 10 * 1024 * 1024) { setError(`图片 ${file.name} 超过 10MB 限制`); continue; }
+      if (file.size > 25 * 1024 * 1024) { setError(`图片 ${file.name} 超过 25MB 限制`); continue; }
       const data = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
@@ -648,7 +1043,7 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     finally { setCompactBusy(false); }
   }
 
-  async function forkFromEntry(entryId: string) {
+  const forkFromEntry = useCallback(async (entryId: string) => {
     if (!device || !selectedId || forkingId) return;
     setForkingId(entryId); setError("");
     try {
@@ -664,7 +1059,14 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
       }
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setForkingId(""); }
-  }
+  }, [device, selectedId, forkingId, refreshSessions]);
+
+  // Stable identity for ConversationMessages' memoized rows (MessageView
+  // compares callback props by reference).
+  const loadThinkingBlock = useCallback(
+    (entryId: string, blockIndex: number) => (device && selectedId ? loadRemoteThinking(device, selectedId, entryId, blockIndex) : Promise.reject(new Error("未选择会话"))),
+    [device, selectedId],
+  );
 
   async function navigateBranch(targetId: string) {
     if (!device || !selectedId) return;
@@ -719,19 +1121,11 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     });
   }
 
-  async function duplicateSession(id: string) {
-    if (!device) return;
-    setRowMenu(null); setError("");
+  async function copySessionId(id: string) {
+    setRowMenu(null);
     try {
-      const detail = await loadRemoteSession(device, id, 1);
-      const lastEntry = detail.context.entryIds.at(-1);
-      if (!lastEntry) { setError("空会话无法复制"); return; }
-      const result = await forkRemoteSession(device, id, lastEntry);
-      if (result.newSessionId) {
-        await refreshSessionsQuiet(device);
-        setSelectedId(result.newSessionId);
-        setNotice("已复制会话");
-      }
+      await navigator.clipboard.writeText(id);
+      setNotice("已复制会话 ID");
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   }
 
@@ -756,10 +1150,8 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
 
   async function loadOlderMessages() {
     if (!device || !selectedId || !detail || loadingOlder) return;
-    const shown = detail.context.messages.length;
-    const total = detail.context.totalMessages ?? shown;
     setLoadingOlder(true);
-    try { await refreshDetail(device, selectedId, true, Math.min(total, Math.max(shown * 2, 80))); }
+    try { await prependOlder(device, selectedId); }
     finally { setLoadingOlder(false); }
   }
 
@@ -897,7 +1289,7 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
           </button>
           {!collapsedGroups[project.root] && project.sessions.map((session) => <div key={session.id} className={`session-row popover-root ${selectedId === session.id ? "selected" : ""}`} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openRowMenu(session.id, event.clientX, event.clientY); }}>
             <button type="button" className="session-row-main" onClick={() => setSelectedId(session.id)} aria-current={selectedId === session.id ? "page" : undefined}>
-              <span className={`session-activity ${running.has(session.id) ? "running" : ""}`} />
+              <span className={`session-activity ${running.has(session.id) ? "running" : session.interrupted ? "interrupted" : ""}`} />
               <span className="session-copy"><strong>{session.name || session.firstMessage || "未命名会话"}</strong><small>{relativeTime(session.modified)} · {session.messageCount} 条消息</small></span>
               {doneIds.has(session.id) && <span className="done-dot" title="有已完成的运行" />}
             </button>
@@ -912,12 +1304,12 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     {rowMenu && <div className="session-menu row-menu popover-root" style={{ left: rowMenu.x, top: rowMenu.y }} onClick={(event) => event.stopPropagation()}>
       <button onClick={() => { setRowMenu(null); setSelectedId(rowMenu.id); }}><MessageSquareText size={13} />打开会话</button>
       <button onClick={() => { setRowMenu(null); void renameSession(rowMenu.id); }}><Pencil size={13} />重命名</button>
-      <button onClick={() => void duplicateSession(rowMenu.id)}><Copy size={13} />复制会话</button>
+      <button onClick={() => void copySessionId(rowMenu.id)}><Copy size={13} />复制会话 ID</button>
       <button className="danger" onClick={() => { setRowMenu(null); void deleteSession(rowMenu.id); }}><Trash2 size={13} />删除</button>
     </div>}
 
     <main className="conversation-pane">
-      <nav className="session-tabs" aria-label="打开的会话">{openTabs.map((id) => { const item = sessions.find((session) => session.id === id); if (!item) return null; const label = item.name || item.firstMessage || "新会话"; return <div key={id} className={`session-tab ${selectedId === id ? "active" : ""}`}><button type="button" className="session-tab-select" aria-current={selectedId === id ? "page" : undefined} onClick={() => setSelectedId(id)} title={label}><span className={`session-activity ${running.has(id) ? "running" : ""}`} /><span>{label}</span>{doneIds.has(id) && <span className="done-dot" />}</button><button type="button" className="session-tab-close" aria-label={`关闭标签：${label}`} onClick={() => closeTab(id)}><X size={11} /></button></div>; })}</nav>
+      <nav className="session-tabs" aria-label="打开的会话">{openTabs.map((id) => { const item = sessions.find((session) => session.id === id); if (!item) return null; const label = item.name || item.firstMessage || "新会话"; return <div key={id} className={`session-tab ${selectedId === id ? "active" : ""}`}><button type="button" className="session-tab-select" aria-current={selectedId === id ? "page" : undefined} onClick={() => setSelectedId(id)} title={label}><span className={`session-activity ${running.has(id) ? "running" : item.interrupted ? "interrupted" : ""}`} /><span>{label}</span>{doneIds.has(id) && <span className="done-dot" />}</button><button type="button" className="session-tab-close" aria-label={`关闭标签：${label}`} onClick={() => closeTab(id)}><X size={11} /></button></div>; })}</nav>
       <div className="conversation-toolbar">
         <div><MessageSquareText size={16} /><h1>{selected?.name || selected?.firstMessage || "选择一个会话"}</h1>{worktrees?.isGit && selected && <WorktreeControl state={worktrees} cwd={selected.cwd} open={worktreeMenu} busy={worktreeBusy} error={worktreeError} onToggle={() => setWorktreeMenu(!worktreeMenu)} onOpen={(target) => void openWorktree(target)} onCreate={() => { setWorktreeMenu(false); setWorktreePrompt(true); }} onRemove={(target) => { setWorktreeMenu(false); setWorktreeRemoving(target); }} />}{!worktrees?.isGit && selected?.worktreeBranch && <span className="branch-chip"><GitBranch size={11} />{selected.worktreeBranch}</span>}</div>
         <div>
@@ -939,10 +1331,11 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
 
       {error && <div className="workspace-error" role="alert"><span>{error}</span><button onClick={() => setError("")} aria-label="关闭错误提示"><X size={14} /></button></div>}
       {notice && <div className="workspace-notice" role="status"><Check size={13} /><span>{notice}</span><button onClick={() => setNotice("")} aria-label="关闭"><X size={13} /></button></div>}
+      {selected?.interrupted && !isRunning && <div className="interrupted-banner" role="status"><CircleAlert size={14} /><span>上次运行被中断（服务重启或连接断开），上下文已保留。</span><button onClick={() => void resumeInterrupted()}>继续运行</button></div>}
       <div className="message-area">
         <div className="message-scroll" ref={messageScrollRef} onScroll={(event) => { const el = event.currentTarget; if (selectedIdRef.current) scrollPositionsRef.current.set(selectedIdRef.current, el.scrollTop); setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 320); }}>
           {detail?.context.truncated && <button className="load-older" onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? <LoaderCircle className="spin" size={13} /> : <ChevronDown size={13} />}加载更早消息（当前 {detail.context.messages.length}/{detail.context.totalMessages}）</button>}
-          {detailLoading && !detail ? <div className="conversation-empty"><LoaderCircle className="spin" />加载最近消息…</div> : detail?.context.messages.length ? <ConversationMessages messages={detail.context.messages} entryIds={detail.context.entryIds} onFork={(entryId) => void forkFromEntry(entryId)} forkingId={forkingId || undefined} onLoadThinking={device && selectedId ? (entryId, blockIndex) => loadRemoteThinking(device, selectedId, entryId, blockIndex) : undefined} /> : <div className="conversation-empty"><Bot size={34} /><h3>准备开始</h3><p>从左侧选择会话，或创建一个新的工作会话。</p></div>}
+          {detailLoading && !detail ? <div className="conversation-empty"><LoaderCircle className="spin" />加载最近消息…</div> : detail?.context.messages.length ? <ConversationMessages messages={detail.context.messages} entryIds={detail.context.entryIds} onFork={forkFromEntry} forkingId={forkingId || undefined} onLoadThinking={device && selectedId ? loadThinkingBlock : undefined} /> : <div className="conversation-empty"><Bot size={34} /><h3>准备开始</h3><p>从左侧选择会话，或创建一个新的工作会话。</p></div>}
         </div>
         {detail && <ChatMinimap messages={detail.context.messages} scrollRef={messageScrollRef} />}
       </div>
@@ -952,26 +1345,69 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
         {askQueue.length > 0 && <AskCard entry={askQueue[0]} sessionName={askQueue[0].sessionId !== selectedId ? sessions.find((session) => session.id === askQueue[0].sessionId)?.name : undefined} onRespond={(response) => void respondAsk(response)} />}
         {compactResult && <div className="compact-result"><Scissors size={12} /><span>上下文已压缩：{formatCompact(compactResult.before)} → {formatCompact(compactResult.after)} tokens（节省 {formatCompact(Math.max(0, compactResult.before - compactResult.after))}）</span><button onClick={() => setCompactResult(null)} aria-label="关闭"><X size={12} /></button></div>}
         {images.length > 0 && <div className="image-attachments">{images.map((image, index) => <span key={index} className="image-attachment"><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.name} /><button onClick={() => setImages((current) => current.filter((_, i) => i !== index))} aria-label="移除图片"><X size={11} /></button></span>)}</div>}
+        <ExtensionWidgets items={aboveWidgets} />
+        {[...customUis.entries()].filter(([, entry]) => entry.sessionId === selectedId).map(([id, entry]) => (
+          <CustomUiCard key={id} id={id} lines={entry.lines} onKey={(data) => { if (device && selectedId) void sendRemoteAgentCommand(device, selectedId, { type: "extension_ui_input", id, data }); }} />
+        ))}
         <div className="composer">
-          <textarea ref={composerRef} aria-label="消息输入" value={draft} onFocus={() => setModelMenu(null)} onCompositionStart={() => { imeComposingRef.current = true; }} onCompositionEnd={() => { imeComposingRef.current = false; imeEndedAtRef.current = Date.now(); }} onChange={(event) => { updateDraft(event.target.value); setSlashDismissed(false); setSlashIndex(0); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(128, event.currentTarget.scrollHeight)}px`; }} onKeyDown={(event) => {
+          <textarea ref={composerRef} aria-label="消息输入" value={draft} onFocus={() => setModelMenu(null)} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)} onCompositionStart={() => { imeComposingRef.current = true; }} onCompositionEnd={() => { imeComposingRef.current = false; imeEndedAtRef.current = Date.now(); }} onChange={(event) => { updateDraft(event.target.value); setComposerCursor(event.target.selectionStart); setSlashDismissed(false); setSlashIndex(0); setMentionDismissed(false); setMentionIndex(0); historyWalkRef.current = null; event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(128, event.currentTarget.scrollHeight)}px`; }} onKeyDown={(event) => {
+            if (mentionOpen) {
+              if (event.key === "ArrowDown") { event.preventDefault(); setMentionIndex((mentionIndex + 1) % mentionItems.length); return; }
+              if (event.key === "ArrowUp") { event.preventDefault(); setMentionIndex((mentionIndex - 1 + mentionItems.length) % mentionItems.length); return; }
+              if (event.key === "Tab") { event.preventDefault(); applyMention(mentionItems[mentionIndex]); return; }
+              if (event.key === "Escape") { event.preventDefault(); setMentionDismissed(true); return; }
+            }
             if (slashOpen) {
               if (event.key === "ArrowDown") { event.preventDefault(); setSlashIndex((slashIndex + 1) % slashItems.length); return; }
               if (event.key === "ArrowUp") { event.preventDefault(); setSlashIndex((slashIndex - 1 + slashItems.length) % slashItems.length); return; }
               if (event.key === "Tab") { event.preventDefault(); applySlash(slashItems[slashIndex]); return; }
               if (event.key === "Escape") { event.preventDefault(); setSlashDismissed(true); return; }
             }
+            // Esc interrupts a running turn (pi-app convention); ArrowUp on an
+            // empty composer walks the per-session prompt history, ArrowDown
+            // walks forward again, any edit cancels the walk (see onChange).
+            if (event.key === "Escape" && isRunning && device && selectedId) {
+              event.preventDefault();
+              void stopRemoteAgent(device, selectedId).then(() => setNotice("已发送中断信号")).catch(() => undefined);
+              return;
+            }
+            if (event.key === "ArrowUp" && selectedId) {
+              const history = promptHistoryRef.current.get(selectedId) ?? [];
+              const walk = historyWalkRef.current;
+              const walking = walk?.sessionId === selectedId;
+              if (!history.length || (draft.trim() && !walking)) return;
+              event.preventDefault();
+              const index = walking ? Math.min(walk.index + 1, history.length - 1) : 0;
+              historyWalkRef.current = { sessionId: selectedId, index };
+              updateDraft(history[history.length - 1 - index]);
+              return;
+            }
+            if (event.key === "ArrowDown" && selectedId && historyWalkRef.current?.sessionId === selectedId) {
+              event.preventDefault();
+              const history = promptHistoryRef.current.get(selectedId) ?? [];
+              const index = historyWalkRef.current.index - 1;
+              if (index < 0) { historyWalkRef.current = null; updateDraft(""); }
+              else { historyWalkRef.current = { sessionId: selectedId, index }; updateDraft(history[history.length - 1 - index]); }
+              return;
+            }
             // WKWebView fires the IME-confirming Enter with isComposing=false —
             // also suppress Enter shortly after compositionend.
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !imeComposingRef.current && Date.now() - imeEndedAtRef.current > 120) {
               event.preventDefault();
+              if (mentionOpen && mentionItems[mentionIndex]) { applyMention(mentionItems[mentionIndex]); return; }
               if (slashOpen && slashItems[slashIndex] && draft !== `/${slashItems[slashIndex].name}`) { applySlash(slashItems[slashIndex]); return; }
               void submit();
             }
           }} placeholder={selectedId ? (isRunning ? "插话：打断当前生成并立即插入…" : detailLoading ? "会话加载中，也可以先输入消息…" : "继续这个会话…") : "请先选择会话"} disabled={!selectedId} />
-          {slashOpen && <div className="composer-menu slash-menu">{slashItems.map((item, index) => <button key={`${item.source ?? "builtin"}-${item.name}`} className={index === slashIndex ? "active" : ""} onMouseDown={(event) => { event.preventDefault(); applySlash(item); }}><span>/{item.name}</span><small>{item.description || item.source || ""}</small></button>)}</div>}
+          {slashOpen && <div className="composer-menu slash-menu" role="listbox" aria-label="斜杠命令">{groupSlashItems(slashItems).map((group) => <div className="slash-group" key={group.source}>
+            <div className="slash-group-label">{slashSourceLabel(group.source)}</div>
+            {group.items.map(({ item, index }) => <button role="option" aria-selected={index === slashIndex} key={`${item.source ?? "builtin"}-${item.name}`} className={index === slashIndex ? "active" : ""} data-slash-active={index === slashIndex ? "" : undefined} onMouseDown={(event) => { event.preventDefault(); applySlash(item); }}><span>/{item.name}</span><small>{item.description || ""}</small></button>)}
+          </div>)}</div>}
+          {mentionOpen && <div className="composer-menu mention-menu">{mentionItems.map((path, index) => <button key={path} className={index === mentionIndex ? "active" : ""} onMouseDown={(event) => { event.preventDefault(); applyMention(path); }}><span>@{path}</span><small>文件引用</small></button>)}</div>}
           <div className="composer-toolbar"><div className="composer-selects popover-root" ref={composerSelectRef}><button className="model-pill" aria-label="选择模型" aria-expanded={modelMenu === "model"} onClick={() => setModelMenu(modelMenu === "model" ? null : "model")}><Bot size={14} />{detail?.context.model?.modelId || "默认模型"}<ChevronDown size={11} /></button><button className="thinking-pill" aria-label="选择思考强度" aria-expanded={modelMenu === "thinking"} onClick={() => setModelMenu(modelMenu === "thinking" ? null : "thinking")}>{thinkingLabel(detail?.context.thinkingLevel)}<ChevronDown size={11} /></button><button className="thinking-pill" title="工具预设" aria-label="选择工具预设" aria-expanded={modelMenu === "tools"} onClick={() => setModelMenu(modelMenu === "tools" ? null : "tools")}><Wrench size={11} />{TOOL_PRESETS.find((item) => item.id === toolPreset)?.label ?? "默认"}<ChevronDown size={11} /></button>{modelMenu === "tools" && <div className="composer-menu thinking-menu tools-menu">{TOOL_PRESETS.map((preset) => <button key={preset.id} className={toolPreset === preset.id ? "active" : ""} onClick={() => void changeToolPreset(preset.id)}>{preset.label}<small>{preset.tools.length ? preset.tools.join(" ") : "停用全部工具"}</small></button>)}</div>}{modelMenu === "model" && <div className="composer-menu model-menu">{models?.modelList.map((item) => <button key={`${item.provider}/${item.id}`} className={detail?.context.model?.provider === item.provider && detail.context.model.modelId === item.id ? "active" : ""} onClick={() => void changeModel(item.provider, item.id)}><span>{item.name || item.id}</span><small>{item.provider}/{item.id}</small></button>)}<button className="manage-models" onClick={() => { setModelMenu(null); setModelsConfigOpen(true); }}><Settings2 size={13} />管理模型配置…</button></div>}{modelMenu === "thinking" && <div className="composer-menu thinking-menu">{thinkingOptions(models, detail).map((level) => <button key={level} className={detail?.context.thinkingLevel === level ? "active" : ""} onClick={() => void changeThinking(level)}>{thinkingLabel(level)}</button>)}</div>}</div><div className="composer-actions"><input ref={filePickRef} type="file" accept="image/*" multiple hidden onChange={(event) => { void pickImages(event.target.files); event.currentTarget.value = ""; }} /><button className="composer-tool" title="添加图片" aria-label="添加图片" onClick={() => filePickRef.current?.click()} disabled={!selectedId}><ImagePlus size={14} /></button><button className="composer-tool" title={isCompacting ? "正在压缩上下文…" : "压缩上下文（Compact）"} aria-label="压缩上下文" onClick={() => void compactSession()} disabled={!selectedId || isCompacting}>{compactBusy ? <LoaderCircle className="spin" size={14} /> : <Scissors size={14} />}</button><button className="composer-tool" title={soundOn ? "关闭完成提示音" : "开启完成提示音"} aria-label="提示音开关" onClick={() => { const next = !soundOn; setSoundOn(next); localStorage.setItem("pihub-sound", next ? "1" : "0"); }}>{soundOn ? <Volume2 size={14} /> : <VolumeX size={14} />}</button></div>{isRunning ? <button className="stop-button" aria-label="停止运行" onClick={async () => { if (!device || !selectedId) return; try { await stopRemoteAgent(device, selectedId); setRunning((current) => { const next = new Set(current); next.delete(selectedId); return next; }); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } }}><Square size={12} fill="currentColor" /></button> : null}<button className="send-button" aria-label={isRunning ? "插话" : "发送消息"} title={isRunning ? "插话：打断当前生成" : "发送"} onClick={() => void submit()} disabled={(!draft.trim() && !images.length) || sending || !selectedId}>{sending ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}</button></div>
         </div>
-        <small>Enter 发送 · Shift + Enter 换行 · 数据保留在远程设备</small>
+        <ExtensionWidgets items={belowWidgets} />
+        <small>{isRunning ? "Enter 插话打断当前生成 · Esc 中断运行" : "Enter 发送 · Shift+Enter 换行 · ↑ 历史输入 · Esc 中断运行"}</small>
       </div>
     </main>
 
@@ -985,7 +1421,7 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
         </div>
         <span className="tool-tabs-spacer" /><button className="new-chat tool-collapse" onClick={() => setRightOpen(false)} title="收起工具面板" aria-label="收起工具面板"><PanelRightClose size={14} /></button>
       </div>
-      {rightOpen && <div className="tool-panel-content" id="workspace-tool-panel" role="tabpanel" aria-labelledby={`tool-tab-${toolTab}`}>{toolTab === "resources" ? <ResourceManager session={selected} device={device} /> : <ToolPanel tab={toolTab} session={selected} device={device} />}</div>}
+      {rightOpen && <div className="tool-panel-content" id="workspace-tool-panel" role="tabpanel" aria-labelledby={`tool-tab-${toolTab}`}>{toolTab === "resources" ? <ResourceManager session={selected} device={device} /> : <ToolPanel tab={toolTab} session={selected} device={device} onInsertMention={insertMention} />}</div>}
     </aside>
     {!leftOpen && <button className="edge-toggle left" onClick={() => setLeftOpen(true)} title="展开会话侧栏" aria-label="展开会话侧栏"><ChevronRight size={13} /></button>}
     {!rightOpen && <button className="edge-toggle right" onClick={() => setRightOpen(true)} title="展开工具面板" aria-label="展开工具面板"><ChevronLeft size={13} /></button>}
@@ -1001,6 +1437,202 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   </div>;
 }
 
+function ExtensionWidgets({ items }: { items: RemoteWidgetItem[] }) {
+  if (!items.length) return null;
+  return <div className="extension-widgets">
+    {items.map((item) => <div key={item.key} className="extension-widget">{item.lines.map((line, index) => <div key={index}>{parseAnsiLine(line)}</div>)}</div>)}
+  </div>;
+}
+
+// Raw terminal sequences a TUI extension expects from its input loop.
+const CUSTOM_UI_KEYS: Record<string, string> = {
+  ArrowUp: "\x1b[A",
+  ArrowDown: "\x1b[B",
+  ArrowRight: "\x1b[C",
+  ArrowLeft: "\x1b[D",
+  Enter: "\r",
+  Escape: "\x1b",
+  Tab: "\t",
+  Backspace: "\x7f",
+  " ": " ",
+};
+
+function customUiKeyData(event: React.KeyboardEvent): string | undefined {
+  const mapped = CUSTOM_UI_KEYS[event.key];
+  if (mapped !== undefined) return mapped;
+  // Pass through printable single characters; ignore pure modifiers and
+  // ctrl/meta/alt combos the headless TUI has no binding for.
+  if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) return event.key;
+  return undefined;
+}
+
+function CustomUiCard({ id, lines, onKey }: { id: string; lines: string[]; onKey: (data: string) => void }) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { bodyRef.current?.focus(); }, []);
+  const parsed = useMemo(() => parseCustomUiLines(lines), [lines]);
+  return <div className="custom-ui-card" data-custom-ui={id}>
+    <div className="custom-ui-card-header">
+      <span className="custom-ui-card-title">扩展交互</span>
+      <span className="custom-ui-card-hint">点击选项或 ↑↓ 选择 · Enter 确认 · Esc 取消</span>
+      <button type="button" className="custom-ui-card-cancel" onClick={() => onKey("\x1b")}>取消</button>
+    </div>
+    <div
+      ref={bodyRef}
+      className="custom-ui-card-body"
+      role="application"
+      aria-label="扩展交互（可点击或键盘操作）"
+      tabIndex={0}
+      onKeyDown={(event) => {
+        const data = customUiKeyData(event);
+        if (data === undefined) return;
+        event.preventDefault();
+        onKey(data);
+      }}
+    >
+      {parsed.tabs && <div className="custom-ui-tabs">{parsed.tabs}</div>}
+      {parsed.context.length > 0 && (parsed.context.length <= 8
+        ? <div className="custom-ui-context">{parsed.context.map((line, index) => <div key={index}>{line || " "}</div>)}</div>
+        : <details className="custom-ui-context collapsible"><summary>请求详情（{parsed.context.length} 行，点击展开）</summary>{parsed.context.map((line, index) => <div key={index}>{line || " "}</div>)}</details>)}
+      {parsed.options.length > 0 && <div className="custom-ui-options" role="listbox" aria-label="可选项">
+        {parsed.options.map((option) => <button
+          key={option.lineIndex}
+          type="button"
+          role="option"
+          aria-selected={option.selected}
+          className={`custom-ui-option${option.selected ? " selected" : ""}`}
+          onClick={() => { onKey(option.key); bodyRef.current?.focus(); }}
+        ><kbd>{option.key}</kbd><span className="custom-ui-option-text"><span>{option.label}</span>{option.description && <span className="custom-ui-option-desc">{option.description}</span>}</span></button>)}
+      </div>}
+      {parsed.tail.length > 0 && <div className="custom-ui-context">{parsed.tail.map((line, index) => <div key={index}>{line || " "}</div>)}</div>}
+    </div>
+  </div>;
+}
+
+interface CustomUiOption { key: string; label: string; description?: string; selected: boolean; lineIndex: number }
+
+interface ParsedCustomUi { context: string[]; tabs: string | null; options: CustomUiOption[]; tail: string[] }
+
+// Frame anatomy of a headless extension custom UI (pi-ask is the reference):
+// `─…─` rules, a `← ☐ tab ☰ Review →` tab bar, the prompt, option rows, and a
+// ` · `-delimited keybinding footer. Option rows are either pi-ask's numbered
+// form (`❯ 1. Label`, multi-select adds an `[x]` checkbox; digit keys are the
+// TUI shortcut) or the `(x) Label` form (letter key, used by the permission
+// system). The current/armed row carries a leading marker glyph — each
+// extension picks its own (pi-ask `❯`, permission system `▶`) — so the parser
+// accepts any single non-alphanumeric symbol rather than a fixed list; a
+// missing marker means the row must still match (an unmatched selected row
+// becomes unclickable text, which made the double-press confirm unreachable
+// and bounced the user between armed states forever). An option's
+// description/recommended subtitle sits directly under it at a fixed 5-space
+// indent. Everything else is context text.
+const CUSTOM_UI_RULE = /^\s*─+\s*$/;
+const CUSTOM_UI_TAB_BAR = /^\s*←.*→\s*$/;
+const CUSTOM_UI_FOOTER = /press a letter|↑|↓|arrow keys?|enter (confirm|submit)|esc (dismiss|cancel|deny)|question type|shift\+|\? settings|to navigate/i;
+const CUSTOM_UI_OPTION_MARKER = "([^\\p{L}\\p{N}\\s])?";
+const CUSTOM_UI_NUMBERED_OPTION = new RegExp(`^\\s*${CUSTOM_UI_OPTION_MARKER}\\s*([1-9])\\.\\s+(?:\\[([ xX])\\]\\s+)?(.+?)\\s*$`, "u");
+const CUSTOM_UI_LETTER_OPTION = new RegExp(`^\\s*${CUSTOM_UI_OPTION_MARKER}\\s*\\(([A-Za-z0-9])\\)\\s+(.+?)\\s*$`, "u");
+const CUSTOM_UI_OPTION_DESCRIPTION = /^ {5}\S/;
+
+/**
+ * Split a TUI frame so the prompt reads as a native choice list: option rows
+ * become clickable buttons (clicking sends the same key the TUI expects — the
+ * option's digit for pi-ask numbered rows, the letter for `(x)` rows), tab bar
+ * and prompt stay as context, a long context collapses, and the keybinding
+ * footer is dropped (the card header already shows one).
+ */
+function parseCustomUiLines(lines: string[]): ParsedCustomUi {
+  const clean = lines.map(stripAnsi);
+  const context: string[] = [];
+  const tail: string[] = [];
+  const options: CustomUiOption[] = [];
+  let tabs: string | null = null;
+  let describeLastOption = false;
+  for (const [index, line] of clean.entries()) {
+    if (CUSTOM_UI_RULE.test(line)) continue;
+    if (CUSTOM_UI_TAB_BAR.test(line)) { tabs = line.trim(); describeLastOption = false; continue; }
+    const numbered = CUSTOM_UI_NUMBERED_OPTION.exec(line);
+    const lettered = numbered === null ? CUSTOM_UI_LETTER_OPTION.exec(line) : null;
+    if (numbered || lettered) {
+      const checkbox = numbered?.[3];
+      options.push({
+        key: numbered ? numbered[2] : lettered![2],
+        label: (checkbox === undefined ? "" : checkbox.toLowerCase() === "x" ? "☑ " : "☐ ") + (numbered ? numbered[4] : lettered![3]),
+        selected: Boolean((numbered ?? lettered)![1]),
+        lineIndex: index,
+      });
+      describeLastOption = true;
+      continue;
+    }
+    const lastOption = options[options.length - 1];
+    if (describeLastOption && lastOption && CUSTOM_UI_OPTION_DESCRIPTION.test(line)) {
+      lastOption.description = lastOption.description ? `${lastOption.description} ${line.trim()}` : line.trim();
+      continue;
+    }
+    describeLastOption = false;
+    if (CUSTOM_UI_FOOTER.test(line)) continue;
+    (options.length > 0 ? tail : context).push(line);
+  }
+  return { context, tabs, options, tail };
+}
+
+// Extension widget lines (e.g. the pi-todo-rail bar) are rendered for a TUI and
+// may carry ANSI escape sequences; parse them into styled spans for display.
+function stripAnsi(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+function parseAnsiLine(line: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  // eslint-disable-next-line no-control-regex
+  const SGR_RE = /\x1B\[([0-9;]*)m/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  const state = { bold: false, dim: false, italic: false, underline: false, fg: "", bg: "" };
+
+  while ((match = SGR_RE.exec(line)) !== null) {
+    if (match.index > lastIndex) {
+      const text = line.slice(lastIndex, match.index);
+      nodes.push(styledSpan(text, state, nodes.length));
+    }
+    const codes = match[1] ? match[1].split(";").map(Number) : [0];
+    for (let i = 0; i < codes.length; i++) {
+      const code = codes[i];
+      if (code === 0) { state.bold = false; state.dim = false; state.italic = false; state.underline = false; state.fg = ""; state.bg = ""; }
+      else if (code === 1) state.bold = true;
+      else if (code === 2) state.dim = true;
+      else if (code === 3) state.italic = true;
+      else if (code === 4) state.underline = true;
+      else if (code === 22) { state.bold = false; state.dim = false; }
+      else if (code === 23) state.italic = false;
+      else if (code === 24) state.underline = false;
+      else if (code === 39) state.fg = "";
+      else if (code === 49) state.bg = "";
+      else if (code >= 30 && code <= 37) state.fg = `ansi-fg-${code - 30}`;
+      else if (code >= 40 && code <= 47) state.bg = `ansi-bg-${code - 40}`;
+      else if (code >= 90 && code <= 97) state.fg = `ansi-fg-${code - 90 + 8}`;
+      else if (code >= 100 && code <= 107) state.bg = `ansi-bg-${code - 100 + 8}`;
+      else if (code === 38 && codes[i + 1] === 5 && codes[i + 2] !== undefined) { state.fg = `ansi-fg-${codes[i + 2]}`; i += 2; }
+      else if (code === 48 && codes[i + 1] === 5 && codes[i + 2] !== undefined) { state.bg = `ansi-bg-${codes[i + 2]}`; i += 2; }
+    }
+    lastIndex = SGR_RE.lastIndex;
+  }
+  if (lastIndex < line.length) nodes.push(styledSpan(line.slice(lastIndex), state, nodes.length));
+  return nodes.length ? nodes : [" "];
+}
+
+function styledSpan(text: string, state: { bold: boolean; dim: boolean; italic: boolean; underline: boolean; fg: string; bg: string }, key: number): React.ReactNode {
+  if (!text) return null;
+  const classes = [state.fg, state.bg].filter(Boolean).join(" ");
+  const style: React.CSSProperties = {};
+  if (state.bold) style.fontWeight = "bold";
+  if (state.dim) style.opacity = 0.6;
+  if (state.italic) style.fontStyle = "italic";
+  if (state.underline) style.textDecoration = "underline";
+  if (!classes && !Object.keys(style).length) return text;
+  return <span key={key} className={classes} style={style}>{text}</span>;
+}
+
 function applyAgentEvent(
   device: Device,
   sessionId: string,
@@ -1008,7 +1640,14 @@ function applyAgentEvent(
   store: (device: Device, sessionId: string, detail: SessionDetail) => void,
   setRunning: React.Dispatch<React.SetStateAction<Set<string>>>,
   streamSessions: Set<string>,
-  extras: { onSettled?: (sessionId: string) => void; onUiRequest?: (sessionId: string, request: RemoteUiRequest) => void } = {},
+  extras: {
+    onSettled?: (sessionId: string) => void;
+    onUiRequest?: (sessionId: string, request: RemoteUiRequest) => void;
+    /** The server reports a replay gap; the transcript needs a snapshot heal. */
+    onStreamReset?: (sessionId: string) => void;
+    /** Server-authoritative running state arrived; drop any local pending mark. */
+    onRunningKnown?: (sessionId: string) => void;
+  } = {},
 ) {
   const current = peekSession(cacheKey(device.id, sessionId));
   const type = String(event.type || "");
@@ -1016,7 +1655,12 @@ function applyAgentEvent(
     extras.onUiRequest?.(sessionId, event as unknown as RemoteUiRequest);
     return;
   }
+  if (type === "replay_reset") {
+    extras.onStreamReset?.(sessionId);
+    return;
+  }
   if (type === "connected" || type === "agent_start") {
+    if (type === "agent_start") extras.onRunningKnown?.(sessionId);
     if (event.isStreaming === true || type === "agent_start") setRunning((value) => new Set(value).add(sessionId));
     return;
   }
@@ -1027,10 +1671,12 @@ function applyAgentEvent(
   if (type === "prompt_error") {
     const message = String(event.errorMessage || event.error || "远端会话返回错误");
     if (current) store(device, sessionId, { ...current, context: { ...current.context, messages: [...current.context.messages, { role: "custom", customType: "stream_error", content: message, timestamp: Date.now() }] } });
+    extras.onRunningKnown?.(sessionId);
     setRunning((value) => { const next = new Set(value); next.delete(sessionId); return next; });
     return;
   }
   if (type === "prompt_done" || type === "agent_settled") {
+    extras.onRunningKnown?.(sessionId);
     setRunning((value) => { const next = new Set(value); next.delete(sessionId); return next; });
     streamSessions.delete(remoteAgentStreamKey(device, sessionId));
     void stopRemoteAgentStream(device, sessionId);
@@ -1181,7 +1827,7 @@ function FolderSessionModal({ device, initialPath, onClose, onCreated }: { devic
 
 function ChevronRightIcon() { return <span className="folder-chevron">›</span>; }
 
-function ToolPanel({ tab, session, device }: { tab: CoreToolTab; session?: RemoteSession; device: Device | null }) {
+function ToolPanel({ tab, session, device, onInsertMention }: { tab: CoreToolTab; session?: RemoteSession; device: Device | null; onInsertMention?: (relativePath: string) => void }) {
   const [files, setFiles] = useState<string[]>([]); const [git, setGit] = useState<RemoteGitStatus | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
   const [gitDiff, setGitDiff] = useState<{ filePath: string; data: RemoteGitDiff } | null>(null); const [gitDiffBusy, setGitDiffBusy] = useState("");
   const [preview, setPreview] = useState<{ path: string; data: RemoteFilePreview } | null>(null); const [previewBusy, setPreviewBusy] = useState(""); const [savedContent, setSavedContent] = useState(""); const [savedFlash, setSavedFlash] = useState(false);
@@ -1217,9 +1863,9 @@ function ToolPanel({ tab, session, device }: { tab: CoreToolTab; session?: Remot
     if (!device || !session) return;
     const files = Array.from(list).filter((file) => file.size > 0 || file.name);
     if (!files.length) return;
-    const oversize = files.find((file) => file.size > 25 * 1024 * 1024);
-    if (oversize) { setError(`「${oversize.name}」超过 25MB 单文件上限`); return; }
-    if (files.reduce((total, file) => total + file.size, 0) > 100 * 1024 * 1024) { setError("上传总大小超过 100MB 上限"); return; }
+    const oversize = files.find((file) => file.size > 256 * 1024 * 1024);
+    if (oversize) { setError(`「${oversize.name}」超过 256MB 单文件上限`); return; }
+    if (files.reduce((total, file) => total + file.size, 0) > 1024 * 1024 * 1024) { setError("上传总大小超过 1GB 上限"); return; }
     setError("");
     try {
       const check = await uploadRemoteCheck(device, directory?.path ?? session.cwd, files.map((file) => file.name));
@@ -1359,7 +2005,7 @@ function ToolPanel({ tab, session, device }: { tab: CoreToolTab; session?: Remot
   if (tab === "files") {
     const sortedEntries = directory ? [...directory.entries].sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name)) : [];
     const crumbs = directory ? pathBreadcrumbs(session.cwd, directory.path) : [];
-    return <><div className={`native-file-list ${dragOver ? "drag-over" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragOver(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragOver(false); }} onDrop={(event) => { event.preventDefault(); setDragOver(false); void startUpload(event.dataTransfer.files); }}><div className="tool-section-head"><span>{directory?.path === session.cwd ? "项目文件" : directory?.path.split(/[\\/]/).at(-1)}</span><div>{uploading && <em className="file-flash">{uploading}</em>}{flash && <em className="file-flash">{flash}</em>}<button aria-label="刷新文件" title="刷新" onClick={() => void enterDirectory(directory?.path ?? session.cwd)}><RefreshCw size={12} /></button><button aria-label="新建文件" title="新建文件" onClick={() => setFileDialog("file")}><Plus size={12} /></button><button aria-label="新建文件夹" title="新建文件夹" onClick={() => setFileDialog("folder")}><FolderPlus size={12} /></button><button aria-label="上传文件到当前目录" title="上传文件到当前目录" onClick={() => uploadInputRef.current?.click()} disabled={Boolean(uploading)}><Upload size={12} /></button><input ref={uploadInputRef} type="file" multiple hidden onChange={(event) => { const picked = Array.from(event.target.files ?? []); event.target.value = ""; if (picked.length) void startUpload(picked); }} /><small>{directory?.entries.length ?? files.length}</small></div></div>{crumbs.length > 1 && <div className="breadcrumbs">{crumbs.map((crumb, index) => <button key={crumb.path} disabled={index === crumbs.length - 1} onClick={() => void enterDirectory(crumb.path)}>{index > 0 && <span className="crumb-sep">›</span>}{crumb.name}</button>)}</div>}{fileDialog && <InlineNameDialog label={fileDialog === "folder" ? "新文件夹" : "新文件"} onCancel={() => setFileDialog(null)} onCreate={(name) => void createEntry(name)} />}{sortedEntries.length === 0 && directory && <div className="file-empty"><Folder size={22} /><span>这个文件夹是空的</span></div>}{directory ? sortedEntries.map((entry) => <button key={entry.name} aria-haspopup="menu" aria-expanded={entryMenu?.entry.name === entry.name} onClick={() => entry.isDir ? void enterDirectory(absoluteRemotePath(directory.path, entry.name)) : void openDirectoryFile(entry.name)} onContextMenu={(event) => { event.preventDefault(); openEntryMenu(event.currentTarget, event.clientX, event.clientY, entry); }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openEntryMenu(event.currentTarget, rect.left + 12, rect.bottom, entry); } }} title={`${entry.name}（右键或 Shift+F10 管理）`} disabled={previewBusy.endsWith(`/${entry.name}`)}>{entry.isDir ? <Folder size={13} /> : <FileCode2 size={13} />}<span>{entry.name}</span>{entry.isDir && <span className="entry-kind">目录</span>}</button>) : files.slice(0, 180).map((file) => <button key={file} onClick={() => void openFile(file)}><FileCode2 size={13} /><span>{file}</span></button>)}</div>{entryMenu && <div ref={entryMenuRef} className="file-context-menu" role="menu" aria-label={`${entryMenu.entry.name} 文件操作`} onKeyDown={handleEntryMenuKey} style={{ left: Math.max(8, Math.min(entryMenu.x, window.innerWidth - 170)), top: Math.max(8, Math.min(entryMenu.y, window.innerHeight - 220)) }}><button role="menuitem" onClick={() => { const item = entryMenu.entry; setEntryMenu(null); if (item.isDir) void enterDirectory(absoluteRemotePath(directory!.path, item.name)); else void openDirectoryFile(item.name); }}><Folder size={13} />打开</button>{!entryMenu.entry.isDir && <button role="menuitem" onClick={() => { const name = entryMenu.entry.name; setEntryMenu(null); void downloadEntry(name); }}><Download size={13} />下载</button>}<button role="menuitem" onClick={() => { setEntryRename(entryMenu.entry.name); setEntryMenu(null); }}><Pencil size={13} />重命名</button><button role="menuitem" onClick={() => { setEntryMove(entryMenu.entry.name); setEntryMenu(null); }}><FolderInput size={13} />移动到…</button><button role="menuitem" className="danger" onClick={() => { setEntryDelete(entryMenu.entry.name); setEntryMenu(null); }}><Trash2 size={13} />删除</button></div>}{entryRename && <NamePromptDialog title="重命名" initial={entryRename} onSubmit={(name) => void submitEntryRename(name)} onClose={() => setEntryRename(null)} />}{entryMove && directory && <NamePromptDialog title={`移动 ${entryMove} 到完整路径`} initial={absoluteRemotePath(directory.path, entryMove)} submitLabel="移动" onSubmit={(destination) => void submitEntryMove(destination)} onClose={() => setEntryMove(null)} />}{entryDelete && <ConfirmDialog title={`删除 ${entryDelete}？`} message="此操作不可撤销。" confirmLabel="删除" danger onConfirm={() => void confirmEntryDelete()} onClose={() => setEntryDelete(null)} />}{uploadConflict && <ConfirmDialog title={`${uploadConflict.names.length} 个同名文件已存在`} message={`${uploadConflict.names.slice(0, 5).join("、")}${uploadConflict.names.length > 5 ? " 等" : ""}。覆盖同名文件？`} confirmLabel="覆盖上传" danger onConfirm={() => { const pending = uploadConflict; setUploadConflict(null); void performUpload(pending.files, "overwrite"); }} onClose={() => setUploadConflict(null)} />}</>;
+    return <><div className={`native-file-list ${dragOver ? "drag-over" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragOver(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragOver(false); }} onDrop={(event) => { event.preventDefault(); setDragOver(false); void startUpload(event.dataTransfer.files); }}><div className="tool-section-head"><span>{directory?.path === session.cwd ? "项目文件" : directory?.path.split(/[\\/]/).at(-1)}</span><div>{uploading && <em className="file-flash">{uploading}</em>}{flash && <em className="file-flash">{flash}</em>}<button aria-label="刷新文件" title="刷新" onClick={() => void enterDirectory(directory?.path ?? session.cwd)}><RefreshCw size={12} /></button><button aria-label="新建文件" title="新建文件" onClick={() => setFileDialog("file")}><Plus size={12} /></button><button aria-label="新建文件夹" title="新建文件夹" onClick={() => setFileDialog("folder")}><FolderPlus size={12} /></button><button aria-label="上传文件到当前目录" title="上传文件到当前目录" onClick={() => uploadInputRef.current?.click()} disabled={Boolean(uploading)}><Upload size={12} /></button><input ref={uploadInputRef} type="file" multiple hidden onChange={(event) => { const picked = Array.from(event.target.files ?? []); event.target.value = ""; if (picked.length) void startUpload(picked); }} /><small>{directory?.entries.length ?? files.length}</small></div></div>{crumbs.length > 1 && <div className="breadcrumbs">{crumbs.map((crumb, index) => <button key={crumb.path} disabled={index === crumbs.length - 1} onClick={() => void enterDirectory(crumb.path)}>{index > 0 && <span className="crumb-sep">›</span>}{crumb.name}</button>)}</div>}{fileDialog && <InlineNameDialog label={fileDialog === "folder" ? "新文件夹" : "新文件"} onCancel={() => setFileDialog(null)} onCreate={(name) => void createEntry(name)} />}{sortedEntries.length === 0 && directory && <div className="file-empty"><Folder size={22} /><span>这个文件夹是空的</span></div>}{directory ? sortedEntries.map((entry) => <button key={entry.name} aria-haspopup="menu" aria-expanded={entryMenu?.entry.name === entry.name} onClick={() => entry.isDir ? void enterDirectory(absoluteRemotePath(directory.path, entry.name)) : void openDirectoryFile(entry.name)} onContextMenu={(event) => { event.preventDefault(); openEntryMenu(event.currentTarget, event.clientX, event.clientY, entry); }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openEntryMenu(event.currentTarget, rect.left + 12, rect.bottom, entry); } }} title={`${entry.name}（右键或 Shift+F10 管理）`} disabled={previewBusy.endsWith(`/${entry.name}`)}>{entry.isDir ? <Folder size={13} /> : <FileCode2 size={13} />}<span>{entry.name}</span>{entry.isDir && <span className="entry-kind">目录</span>}</button>) : files.slice(0, 180).map((file) => <button key={file} onClick={() => void openFile(file)}><FileCode2 size={13} /><span>{file}</span></button>)}</div>{entryMenu && <div ref={entryMenuRef} className="file-context-menu" role="menu" aria-label={`${entryMenu.entry.name} 文件操作`} onKeyDown={handleEntryMenuKey} style={{ left: Math.max(8, Math.min(entryMenu.x, window.innerWidth - 170)), top: Math.max(8, Math.min(entryMenu.y, window.innerHeight - 220)) }}><button role="menuitem" onClick={() => { const item = entryMenu.entry; setEntryMenu(null); if (item.isDir) void enterDirectory(absoluteRemotePath(directory!.path, item.name)); else void openDirectoryFile(item.name); }}><Folder size={13} />打开</button>{onInsertMention && <button role="menuitem" onClick={() => { const item = entryMenu.entry; setEntryMenu(null); if (directory) onInsertMention(`${relativeRemotePath(session.cwd, absoluteRemotePath(directory.path, item.name))}${item.isDir ? "/" : ""}`); }}><AtSign size={13} />在消息中引用</button>}{!entryMenu.entry.isDir && <button role="menuitem" onClick={() => { const name = entryMenu.entry.name; setEntryMenu(null); void downloadEntry(name); }}><Download size={13} />下载</button>}<button role="menuitem" onClick={() => { setEntryRename(entryMenu.entry.name); setEntryMenu(null); }}><Pencil size={13} />重命名</button><button role="menuitem" onClick={() => { setEntryMove(entryMenu.entry.name); setEntryMenu(null); }}><FolderInput size={13} />移动到…</button><button role="menuitem" className="danger" onClick={() => { setEntryDelete(entryMenu.entry.name); setEntryMenu(null); }}><Trash2 size={13} />删除</button></div>}{entryRename && <NamePromptDialog title="重命名" initial={entryRename} onSubmit={(name) => void submitEntryRename(name)} onClose={() => setEntryRename(null)} />}{entryMove && directory && <NamePromptDialog title={`移动 ${entryMove} 到完整路径`} initial={absoluteRemotePath(directory.path, entryMove)} submitLabel="移动" onSubmit={(destination) => void submitEntryMove(destination)} onClose={() => setEntryMove(null)} />}{entryDelete && <ConfirmDialog title={`删除 ${entryDelete}？`} message="此操作不可撤销。" confirmLabel="删除" danger onConfirm={() => void confirmEntryDelete()} onClose={() => setEntryDelete(null)} />}{uploadConflict && <ConfirmDialog title={`${uploadConflict.names.length} 个同名文件已存在`} message={`${uploadConflict.names.slice(0, 5).join("、")}${uploadConflict.names.length > 5 ? " 等" : ""}。覆盖同名文件？`} confirmLabel="覆盖上传" danger onConfirm={() => { const pending = uploadConflict; setUploadConflict(null); void performUpload(pending.files, "overwrite"); }} onClose={() => setUploadConflict(null)} />}</>;
   }
   if (tab === "git" && gitDiff) return <GitDiffView value={gitDiff} onClose={() => setGitDiff(null)} />;
   if (tab === "git") return <div className="native-git-list">{git?.isGitRepository === false ? <div className="tool-placeholder compact"><div><GitBranch size={24} /></div><h3>不是 Git 仓库</h3><p>{session.cwd}</p></div> : git?.isBareRepository ? <div className="tool-placeholder compact"><div><GitBranch size={24} /></div><h3>裸仓库没有工作区 diff</h3><p>{git.repositoryRoot}</p></div> : <><div className="git-summary"><div><strong>{git?.files.length ?? 0}</strong><span>个变更</span></div><div className="git-lines"><b>+{git?.additions ?? 0}</b><em>-{git?.deletions ?? 0}</em></div></div>{git?.files.length === 0 && <div className="git-clean"><Check size={18} /><span>工作区没有改动</span></div>}{git?.files.map((file) => <button key={file.filePath} onClick={() => void openGitDiff(file.filePath)} disabled={gitDiffBusy === file.filePath} aria-label={`查看 ${file.filePath.split(/[\\/]/).at(-1)} 的 Git diff`}><span className={`git-badge ${file.status}`}>{gitDiffBusy === file.filePath ? <LoaderCircle className="spin" size={11} /> : gitStatusLetter(file.status)}</span><span>{file.filePath.split(/[\\/]/).at(-1)}</span><small>{file.filePath}</small></button>)}</>}</div>;
@@ -1394,14 +2040,21 @@ function InlineNameDialog({ label, onCancel, onCreate }: { label: string; onCanc
 
 function relativeTime(value: string): string {
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
-  if (seconds < 60) return "刚刚"; if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`; return `${Math.floor(seconds / 86400)} 天前`;
+  if (seconds < 60) return "刚刚"; if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时`;
+  const days = Math.floor(seconds / 86400);
+  return days < 7 ? `${days} 天` : `${Math.floor(days / 7)} 周`;
 }
 
 function thinkingLabel(value?: string) { return ({ off: "不思考", minimal: "极简", low: "轻度", medium: "中度", high: "深度", xhigh: "极深", max: "最大" } as Record<string, string>)[value || ""] || "自动思考"; }
 function gitStatusLetter(value: string) { return ({ modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U" } as Record<string, string>)[value] || "•"; }
 function formatBytes(value: number) { return value < 1024 ? `${value} B` : value < 1024 * 1024 ? `${(value / 1024).toFixed(1)} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`; }
 function absoluteRemotePath(cwd: string, relative: string) { if (/^(?:\/|[A-Za-z]:[\\/])/.test(relative)) return relative.replaceAll("\\", "/"); return `${cwd.replace(/[\\/]$/, "")}/${relative}`.replaceAll("\\", "/"); }
+function relativeRemotePath(cwd: string, absolute: string) { const base = cwd.replaceAll("\\", "/").replace(/\/+$/, ""); const target = absolute.replaceAll("\\", "/"); return target.startsWith(`${base}/`) ? target.slice(base.length + 1) : target; }
+/** Mentions are plain text: `@path` (quoted when the path contains spaces); the agent resolves them against the session cwd. */
+function quoteMention(path: string): string {
+  return path.includes(" ") ? `@"${path.replaceAll('"', "")}" ` : `@${path} `;
+}
 function pathBreadcrumbs(root: string, current: string): Array<{ name: string; path: string }> {
   const normalize = (value: string) => value.replaceAll("\\", "/").replace(/\/+$/, "");
   const base = normalize(root); const here = normalize(current);
@@ -1612,12 +2265,47 @@ function playDoneSound() {
 
 /* ---------- Slash commands + tool presets ---------- */
 
-const BUILTIN_SLASH_COMMANDS: Array<{ name: string; description: string; source?: string }> = [
+export interface SlashCommandItem { name: string; description?: string; source?: string }
+
+const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
   { name: "compact", description: "压缩上下文（可附带说明）", source: "builtin" },
   { name: "reload", description: "重载会话资源与扩展", source: "builtin" },
+  { name: "new", description: "在当前项目新建会话", source: "builtin" },
   { name: "name", description: "重命名会话：/name <名称>", source: "builtin" },
+  { name: "title", description: "自动生成会话标题", source: "builtin" },
   { name: "copy", description: "复制上一条助手回复", source: "builtin" },
+  { name: "export", description: "导出会话为 HTML", source: "builtin" },
+  { name: "fork", description: "从当前位置分叉出新会话", source: "builtin" },
+  { name: "session", description: "查看会话统计与上下文用量", source: "builtin" },
+  { name: "stop", description: "中断当前运行", source: "builtin" },
 ];
+
+const SLASH_SOURCE_META: Record<string, { label: string }> = {
+  builtin: { label: "命令" },
+  extension: { label: "扩展" },
+  skill: { label: "技能" },
+  prompt: { label: "提示词" },
+};
+
+function slashSourceLabel(source: string | undefined): string {
+  return SLASH_SOURCE_META[source ?? ""]?.label ?? "扩展";
+}
+
+/** Group palette items by source, keeping the flat order inside each group. */
+function groupSlashItems(items: SlashCommandItem[]): Array<{ source: string; items: Array<{ item: SlashCommandItem; index: number }> }> {
+  const order = ["builtin", "skill", "prompt", "extension"];
+  const groups: Array<{ source: string; items: Array<{ item: SlashCommandItem; index: number }> }> = [];
+  items.forEach((item, index) => {
+    const source = item.source === "builtin" ? "builtin" : item.source === "skill" ? "skill" : item.source === "prompt" ? "prompt" : "extension";
+    let group = groups.find((entry) => entry.source === source);
+    if (!group) {
+      group = { source, items: [] };
+      groups.push(group);
+    }
+    group.items.push({ item, index });
+  });
+  return groups.sort((left, right) => order.indexOf(left.source) - order.indexOf(right.source));
+}
 
 // Mirrors server/lib/tool-presets.ts.
 const TOOL_PRESETS: Array<{ id: string; label: string; tools: string[] }> = [
@@ -1661,6 +2349,7 @@ function AskCard({ entry, sessionName, onRespond }: {
   onRespond: (response: { value: string } | { confirmed: boolean } | { cancelled: true }) => void;
 }) {
   const { request } = entry;
+  const isMac = navigator.platform.toLowerCase().includes("mac");
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
   const [index, setIndex] = useState(0);
   useEffect(() => {
@@ -1703,7 +2392,7 @@ function AskCard({ entry, sessionName, onRespond }: {
     {request.method === "input" && <input className="ask-input" autoFocus value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
     {request.method === "editor" && <textarea className="ask-editor" autoFocus value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} />}
     <div className="ask-inline-foot">
-      {request.method === "editor" && <span className="ask-hint">⌘Enter 提交</span>}
+      {request.method === "editor" && <span className="ask-hint">{isMac ? "⌘" : "Ctrl+"}Enter 提交</span>}
       {request.method === "select" && <span className="ask-hint">↑↓ 选择 · Enter 确认 · Esc 取消</span>}
       <button className="ask-cancel" onClick={() => onRespond({ cancelled: true })}>取消</button>
       {request.method === "confirm"

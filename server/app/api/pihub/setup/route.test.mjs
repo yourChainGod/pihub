@@ -58,11 +58,24 @@ test("returns a bounded, private default-extension status", async () => {
   assert.equal(response.status, 200);
   assertPrivate(response);
   assert.equal(body.defaultExtensions.source, "signed-release");
-  assert.equal(body.defaultExtensions.total, 5);
-  assert.equal(body.defaultExtensions.packages.length, 5);
+  assert.equal(body.defaultExtensions.total, 7);
+  assert.equal(body.defaultExtensions.packages.length, 7);
   assert.equal(body.defaultExtensions.installedCount >= 0, true);
-  assert.equal(body.defaultExtensions.installedCount <= 5, true);
+  assert.equal(body.defaultExtensions.installedCount <= 7, true);
   assert.equal(JSON.stringify(body).includes(process.cwd()), false);
+});
+
+test("reports the bundled pi version and per-package installed versions", async () => {
+  const response = await route.GET(request("GET"));
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(typeof body.pi.installed, "boolean");
+  assert.ok(body.pi.version === null || typeof body.pi.version === "string");
+  if (body.pi.installed) assert.match(body.pi.version, /^\d+\.\d+\.\d+/);
+  for (const entry of body.defaultExtensions.packages) {
+    assert.equal(typeof entry.version, "string");
+    assert.ok(entry.installedVersion === null || typeof entry.installedVersion === "string");
+  }
 });
 
 test("retires legacy Magic Context actions without executing setup commands", async () => {

@@ -116,6 +116,7 @@ export async function POST(req: Request) {
       thinkingLevel: state.thinkingLevel,
     });
   } catch (error) {
+    console.error("[pihub] agent/new request failed:", error instanceof Error ? error.message : error);
     const status = error instanceof AllowedRootError
       ? (error.code === "UNSAFE_ROOT" ? 403 : 400)
       : 500;

@@ -63,6 +63,28 @@ test("root is rejected before the installer creates files or runs commands", asy
   assert.equal(commandCount, 0);
   assert.equal(fs.existsSync(path.join(home, ".config")), false);
   assert.equal(fs.existsSync(path.join(home, ".local")), false);
+
+  // The explicit desktop-confirmed gate lifts the rejection.
+  process.env.PIHUB_ALLOW_ROOT = "1";
+  t.after(() => { delete process.env.PIHUB_ALLOW_ROOT; });
+  const fixture = createFixture(t);
+  let activeProbeCount = 0;
+  const runner = (command, args) => {
+    if (command === "systemctl" && args.includes("is-enabled")) return commandResult(1);
+    if (command === "systemctl" && args.includes("is-active")) {
+      activeProbeCount += 1;
+      return commandResult(activeProbeCount === 1 ? 1 : 0);
+    }
+    return commandResult();
+  };
+  await installer.installPersistentService({
+    platform: "linux",
+    uid: 0,
+    ...fixture,
+    runner,
+    healthCheck: async () => {},
+  });
+  assert.ok(fs.existsSync(path.join(fixture.home, ".config", "systemd", "user")), "root install with the gate should create the user unit directory");
 });
 
 test("launchd XML escapes every dynamic value and applies a private umask", () => {
