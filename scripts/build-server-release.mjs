@@ -288,6 +288,16 @@ try {
       "--sbom-format=cyclonedx",
       "--sbom-type=application",
     ], path.join(stageDirectory, "extensions"), 128 * 1024 * 1024);
+    const prunedPackages = new Set(
+      [...(extensionBundle.prunedPlatformModules ?? []), ...platformPruning]
+        .map((relative) => {
+          const segments = relative.split("/");
+          const marker = segments.lastIndexOf("node_modules");
+          const rest = segments.slice(marker + 1);
+          return rest[0]?.startsWith("@") ? `${rest[0]}/${rest[1] ?? ""}` : rest[0];
+        })
+        .filter(Boolean),
+    );
     const sbomDocument = normalizeServerReleaseSbom(
       JSON.parse(serverSbomText),
       JSON.parse(extensionSbomText),
@@ -300,6 +310,7 @@ try {
       platform,
       stagingDirectory: stageDirectory,
       version,
+      prunedPackages,
       },
     );
     fs.writeFileSync(sbom, `${JSON.stringify(sbomDocument, null, 2)}\n`, { mode: 0o644 });

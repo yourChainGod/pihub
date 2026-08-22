@@ -261,7 +261,15 @@ function validateGeneratedGraph(document) {
   return graph;
 }
 
-function normalizeInstalledTree(document, { packageName, pathPrefix, stagingDirectory, version }) {
+function packageNameFromTreePath(relative) {
+  const segments = String(relative).split("/");
+  const marker = segments.lastIndexOf("node_modules");
+  if (marker < 0 || marker + 1 >= segments.length) return "";
+  const rest = segments.slice(marker + 1);
+  return rest[0].startsWith("@") ? `${rest[0]}/${rest[1] ?? ""}` : rest[0];
+}
+
+function normalizeInstalledTree(document, { packageName, pathPrefix, stagingDirectory, version, prunedPackages }) {
   const treeRoot = pathPrefix ? path.join(stagingDirectory, pathPrefix) : stagingDirectory;
   const rootInfo = fs.lstatSync(treeRoot, { throwIfNoEntry: false });
   if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) {
@@ -285,6 +293,9 @@ function normalizeInstalledTree(document, { packageName, pathPrefix, stagingDire
       if (!metadata) {
         const lockEntry = lock.packages[relative];
         if (isRecord(lockEntry) && (lockEntry.peer === true || lockEntry.optional === true)) continue;
+        // Platform pruning intentionally removes non-target native packages
+        // from the physical tree; they stay in the lock graph.
+        if (prunedPackages?.has(packageNameFromTreePath(relative))) continue;
         throw new Error("Server SBOM required dependency does not resolve to a physical package");
       }
       if (component.name !== metadata.name || component.version !== metadata.version) {
@@ -559,17 +570,20 @@ export function normalizeServerReleaseSbom(serverInput, extensionInput, options)
     throw new Error("npm SBOM unexpectedly contains reserved PiHub release properties");
   }
   const stagingDirectory = path.resolve(options.stagingDirectory);
+  const prunedPackages = options.prunedPackages instanceof Set ? options.prunedPackages : undefined;
   const serverTree = normalizeInstalledTree(serverDocument, {
     packageName: options.packageName,
     pathPrefix: "",
     stagingDirectory,
     version: options.version,
+    prunedPackages,
   });
   const extensionTree = normalizeInstalledTree(extensionDocument, {
     packageName: EXTENSION_PACKAGE_NAME,
     pathPrefix: EXTENSION_DIRECTORY,
     stagingDirectory,
     version: options.version,
+    prunedPackages,
   });
 
   const components = new Map();

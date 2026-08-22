@@ -247,6 +247,8 @@ jobs:
         run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
 
       - name: Build the standalone Server release
+        env:
+          PIHUB_PRIVACY_DEBUG: "1"
         run: |
           npm run server:build
           node scripts/build-server-release.mjs --platform "${{ matrix.platform }}" --arch "${{ matrix.arch }}"

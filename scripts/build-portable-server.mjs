@@ -224,6 +224,9 @@ export async function buildPortableServer(options = {}) {
       limits: { maxFileBytes: 128 * 1024 * 1024 },
     });
     if (scan.findings.length > 0) {
+      if (process.env.PIHUB_PRIVACY_DEBUG === "1") {
+        console.error("[privacy-debug] portable build findings:", scan.findings.map((finding) => `${finding.rule} at ${finding.path}`).join("; "));
+      }
       throw new Error(`Portable Server build failed privacy review (${scan.findings[0].rule})`);
     }
     const buildId = fs.readFileSync(path.join(stagingServerDirectory, ".next", "BUILD_ID"), "utf8").trim();

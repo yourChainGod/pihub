@@ -109,6 +109,15 @@ const ALLOWED_PHYSICAL_INSTALL_SCRIPTS = new Map([
 ]);
 const AUDITED_PRIVACY_FINDINGS = new Map([
   [
+    // Upstream Rust build-machine paths (`C:\Users\runneradmin\.cargo\...`)
+    // embedded in the win32-arm64 fff binary; build paths only, no user data.
+    "node_modules/@ff-labs/fff-bin-win32-arm64/fff_c.dll",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "8a2db277c10c120bc048719dd23210130f7824c1a7fb2381bdc4c8aad949f6e8",
+    }),
+  ],
+  [
     "node_modules/@gotgenes/pi-subagents/CHANGELOG.md",
     Object.freeze({
       rules: new Set(["absolute-user-path"]),
@@ -959,9 +968,9 @@ export async function stageDefaultExtensionBundle({
   if (fs.existsSync(hiddenLock)) fs.rmSync(hiddenLock);
   // A release archive targets exactly one platform/arch: drop every other
   // native payload before the inventory is computed over the staged tree.
-  if (platform && arch) {
-    pruneExtensionPlatformModules(destinationDirectory, { platform, arch });
-  }
+  const prunedPlatformModules = platform && arch
+    ? pruneExtensionPlatformModules(destinationDirectory, { platform, arch })
+    : [];
   const preInventory = await verifyDefaultExtensionBundle(destinationDirectory, {
     expectedVersion,
     requireInventory: false,
@@ -984,6 +993,7 @@ export async function stageDefaultExtensionBundle({
     lockSha256: await sha256File(path.join(destinationDirectory, "package-lock.json")),
     notices,
     physicalPackages: preInventory.packages.length,
+    prunedPlatformModules,
     toolchain,
   };
 }
