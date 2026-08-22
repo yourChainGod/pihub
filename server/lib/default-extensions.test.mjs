@@ -84,7 +84,7 @@ test("provisions the signed extensions, preserves custom settings, and disables 
 
   const provisioned = await provisionDefaultExtensions(release, {
     agentDir,
-    home: agentDir,
+    home: agentDir, environment: { XDG_CONFIG_HOME: "" },
     expectedPackages: DEFAULT_EXTENSIONS.map(({ name, version }) => ({ name, version })),
   });
 
@@ -110,7 +110,7 @@ test("provisions the signed extensions, preserves custom settings, and disables 
   assert.equal(permissionConfig.permission.path["~/.ssh/*"], "deny");
   assert.equal(permissionConfig.permission.bash["rm -rf /"], "deny");
   assert.equal(permissionConfig.permission.bash["git push --force*"], "ask");
-  assert.equal((await inspectDefaultExtensions(release, { agentDir, home: agentDir })).installed, true);
+  assert.equal((await inspectDefaultExtensions(release, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } })).installed, true);
 });
 
 test("default extension preference is canonical, bounded, and fails closed", async (t) => {
@@ -134,7 +134,7 @@ test("does not modify a non-empty AGENTS.md during Magic Context provisioning", 
   const agentsFile = path.join(agentDir, "AGENTS.md");
   const original = "# User instructions\nKeep this file unchanged.\n";
   write(agentsFile, original);
-  await provisionDefaultExtensions(release, { agentDir, home: agentDir });
+  await provisionDefaultExtensions(release, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } });
   assert.equal(fs.readFileSync(agentsFile, "utf8"), original);
 });
 
@@ -144,12 +144,12 @@ test("injects AGENTS.md only when it is missing or semantically empty", async (t
   const agentsFile = path.join(agentDir, "AGENTS.md");
 
   write(agentsFile, " \n\t\n");
-  await provisionDefaultExtensions(release, { agentDir, home: agentDir });
+  await provisionDefaultExtensions(release, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } });
   assert.match(fs.readFileSync(agentsFile, "utf8"), /PiHub managed context/);
 
   const secondAgentDir = agentFixture(t);
   const missingAgentsFile = path.join(secondAgentDir, "AGENTS.md");
-  await provisionDefaultExtensions(release, { agentDir: secondAgentDir, home: secondAgentDir });
+  await provisionDefaultExtensions(release, { agentDir: secondAgentDir, home: secondAgentDir, environment: { XDG_CONFIG_HOME: "" } });
   assert.match(fs.readFileSync(missingAgentsFile, "utf8"), /PiHub managed context/);
 });
 
@@ -157,12 +157,12 @@ test("switches every facade to the activated version and can restore exact previ
   const first = releaseFixture(t, "first");
   const second = releaseFixture(t, "second");
   const agentDir = agentFixture(t);
-  await provisionDefaultExtensions(first, { agentDir, home: agentDir });
+  await provisionDefaultExtensions(first, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } });
   const settingsFile = path.join(agentDir, "settings.json");
   const originalSettings = fs.readFileSync(settingsFile);
   const originalFacades = new Map(DEFAULT_EXTENSIONS.map(({ name }) => [name, fs.readFileSync(facadeFile(agentDir, name))]));
 
-  const switched = await provisionDefaultExtensions(second, { agentDir, home: agentDir });
+  const switched = await provisionDefaultExtensions(second, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } });
   for (const extension of DEFAULT_EXTENSIONS) {
     assert.match(fs.readFileSync(facadeFile(agentDir, extension.name), "utf8"), new RegExp(second.replaceAll("\\", "\\\\")));
   }
@@ -172,20 +172,20 @@ test("switches every facade to the activated version and can restore exact previ
   for (const extension of DEFAULT_EXTENSIONS) {
     assert.deepEqual(fs.readFileSync(facadeFile(agentDir, extension.name)), originalFacades.get(extension.name));
   }
-  assert.equal((await inspectDefaultExtensions(first, { agentDir, home: agentDir })).installed, true);
+  assert.equal((await inspectDefaultExtensions(first, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } })).installed, true);
 });
 
 test("repairs a crash-like mixed facade state idempotently", async (t) => {
   const first = releaseFixture(t, "crash-first");
   const second = releaseFixture(t, "crash-second");
   const agentDir = agentFixture(t);
-  await provisionDefaultExtensions(first, { agentDir, home: agentDir });
+  await provisionDefaultExtensions(first, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } });
   const damaged = facadeFile(agentDir, DEFAULT_EXTENSIONS[0].name);
   fs.writeFileSync(damaged, JSON.stringify({ name: DEFAULT_EXTENSIONS[0].name, version: DEFAULT_EXTENSIONS[0].version, pi: {} }));
   assert.equal((await inspectDefaultExtensions(first, { agentDir })).installed, false);
 
-  await provisionDefaultExtensions(second, { agentDir, home: agentDir });
-  const status = await inspectDefaultExtensions(second, { agentDir, home: agentDir });
+  await provisionDefaultExtensions(second, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } });
+  const status = await inspectDefaultExtensions(second, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } });
   assert.equal(status.installed, true);
   assert.equal(status.installedCount, DEFAULT_EXTENSIONS.length);
 });
@@ -194,7 +194,7 @@ test("rolls back facade and settings writes when a later configuration target is
   const first = releaseFixture(t, "rollback-first");
   const second = releaseFixture(t, "rollback-second");
   const agentDir = agentFixture(t);
-  await provisionDefaultExtensions(first, { agentDir, home: agentDir });
+  await provisionDefaultExtensions(first, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } });
   const before = new Map([
     ["settings", fs.readFileSync(path.join(agentDir, "settings.json"))],
     ...DEFAULT_EXTENSIONS.map(({ name }) => [name, fs.readFileSync(facadeFile(agentDir, name))]),
@@ -204,7 +204,7 @@ test("rolls back facade and settings writes when a later configuration target is
   fs.mkdirSync(permissionFile);
 
   await assert.rejects(
-    provisionDefaultExtensions(second, { agentDir, home: agentDir }),
+    provisionDefaultExtensions(second, { agentDir, home: agentDir, environment: { XDG_CONFIG_HOME: "" } }),
     /state file is invalid/,
   );
 
@@ -225,7 +225,7 @@ test("rejects extension tampering and contract drift before touching Pi settings
   await assert.rejects(
     provisionDefaultExtensions(release, {
       agentDir,
-      home: agentDir,
+      home: agentDir, environment: { XDG_CONFIG_HOME: "" },
       expectedPackages: DEFAULT_EXTENSIONS.slice(0, -1),
     }),
     /contract does not match/,
