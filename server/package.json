@@ -89,6 +89,6 @@
     "rehype-sanitize": "^6.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "typescript": "^5"
+    "typescript": "^7"
   }
 }
