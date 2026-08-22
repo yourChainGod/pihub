@@ -5,8 +5,7 @@ import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "..");
 const ciPath = path.join(root, ".github", "workflows", "ci.yml");
-const promotionPath = path.join(root, ".github", "workflows", "promote-release.yml");
-const releasePath = path.join(root, ".github", "workflows", "release.yml");
+const releasePath = path.join(root, ".github", "workflows", "server-release.yml");
 const securityPath = path.join(root, ".github", "workflows", "security.yml");
 
 function jobBlock(source, name) {
@@ -49,9 +48,7 @@ test("release workflow binds every privileged job to one immutable tag commit", 
 
   const releaseJobs = [
     "build-server-release",
-    "build-desktop-release",
-    "assemble-release",
-    "attest-release",
+    "sign-release",
     "publish-draft",
   ];
   for (const name of releaseJobs) {
@@ -61,84 +58,42 @@ test("release workflow binds every privileged job to one immutable tag commit", 
     assert.match(job, /PIHUB_RELEASE_COMMIT/, `${name} must compare the peeled commit`);
     assert.match(job, /compare\/\$\{PIHUB_RELEASE_COMMIT|compare\/\$\{commit/, `${name} must recheck main ancestry`);
   }
-  for (const name of ["build-server-release", "build-desktop-release", "assemble-release"]) {
+  for (const name of ["build-server-release", "sign-release"]) {
     assert.match(jobBlock(workflow, name), /ref: \$\{\{ needs\.validate\.outputs\.commit \}\}/, `${name} must checkout the fixed commit`);
   }
-  assert.doesNotMatch(jobBlock(workflow, "attest-release"), /actions\/checkout/);
   assert.doesNotMatch(jobBlock(workflow, "publish-draft"), /actions\/checkout/);
 
   const publish = jobBlock(workflow, "publish-draft");
-  assert.match(publish, /assert_remote_source\(\)/);
-  assert.equal((publish.match(/assert_remote_source(?:\(\))?/g) ?? []).length, 3, "publication must check the remote source before and after mutation");
   assert.match(publish, /releases\?per_page=100/);
   assert.match(publish, /--paginate --slurp/);
-  assert.match(publish, /releases\/assets\/\$\{asset_id\}/);
   assert.match(publish, /uploads\.github\.com\/repos\/\$\{GITHUB_REPOSITORY\}\/releases\/\$\{release_id\}\/assets/);
   assert.doesNotMatch(publish, /gh release (?:create|download|upload)/);
 });
 
 test("release secrets and token powers stay in protected least-privilege jobs", () => {
   const workflow = fs.readFileSync(releasePath, "utf8");
-  const desktop = jobBlock(workflow, "build-desktop-release");
-  const assembly = jobBlock(workflow, "assemble-release");
-  const attestation = jobBlock(workflow, "attest-release");
+  const sign = jobBlock(workflow, "sign-release");
   const publish = jobBlock(workflow, "publish-draft");
+  const build = jobBlock(workflow, "build-server-release");
+  const validate = jobBlock(workflow, "validate");
 
-  assert.match(desktop, /^ {4}environment: pihub-release-signing$/m);
-  assert.match(assembly, /^ {4}environment: pihub-release-signing$/m);
+  assert.match(sign, /^ {4}environment: pihub-release-signing$/m);
   assert.match(publish, /^ {4}environment: pihub-release-publishing$/m);
-  assert.doesNotMatch(attestation, /environment: pihub-release-signing/);
+  assert.doesNotMatch(validate, /environment:/);
+  assert.doesNotMatch(build, /environment:/);
 
-  assert.doesNotMatch(desktop, /^ {6}(?:id-token|attestations): write$/m);
-  assert.doesNotMatch(assembly, /^ {6}(?:contents|id-token|attestations): write$/m);
-  assert.match(attestation, /^ {6}id-token: write$/m);
-  assert.match(attestation, /^ {6}attestations: write$/m);
-  assert.doesNotMatch(attestation, /^ {6}contents: write$/m);
+  assert.doesNotMatch(sign, /^ {6}(?:contents|id-token|attestations): write$/m);
   assert.match(publish, /^ {6}contents: write$/m);
   assert.doesNotMatch(publish, /^ {6}(?:id-token|attestations): write$/m);
 
-  const allowedSecretSteps = new Set([
-    "Prepare updater and platform signing config",
-    "Install Windows signing certificate",
-    "Build and sign desktop artifacts",
-    "Verify macOS code signature, identity, Gatekeeper, and notarization",
-    "Verify Windows Authenticode identity and trusted timestamp",
-    "Remove Windows signing certificate",
-    "Sign Server manifest",
-    "Sign and finalize desktop update manifest",
-  ]);
   for (const match of workflow.matchAll(/^([ ]*)[^\n]*\$\{\{ secrets\.[^\n]+$/gm)) {
     assert.equal(match[1].length, 10, "signing secrets must be injected through step-level env only");
-    assert.ok(allowedSecretSteps.has(stepNameAt(workflow, match.index)), `secret used by unexpected step: ${stepNameAt(workflow, match.index)}`);
+    assert.equal(stepNameAt(workflow, match.index), "Sign Server manifest", "secret used by unexpected step");
   }
 });
 
-test("native package verification is fail-closed before release upload", () => {
-  const workflow = fs.readFileSync(releasePath, "utf8");
-  const desktop = jobBlock(workflow, "build-desktop-release");
-
-  for (const command of [
-    "codesign --verify --deep --strict",
-    "spctl --assess --type execute",
-    "spctl --assess --type open",
-    "xcrun stapler validate",
-    "TeamIdentifier=${APPLE_TEAM_ID}",
-    "Authority=${APPLE_SIGNING_IDENTITY}",
-    "& $signTool verify /pa /all /v",
-    "Get-AuthenticodeSignature",
-    "TimeStamperCertificate",
-    "dpkg-deb --field",
-    "file --brief",
-    "gzip --test",
-  ]) {
-    assert.ok(desktop.includes(command), `missing native release verification: ${command}`);
-  }
-  assert.match(desktop, /assembly job cryptographically verifies every Tauri updater signature/);
-});
-
-test("release workflows use standalone Server archives and signed manifests only", () => {
+test("release workflow ships standalone Server archives with a signed manifest", () => {
   const ci = fs.readFileSync(ciPath, "utf8");
-  const promotion = fs.readFileSync(promotionPath, "utf8");
   const release = fs.readFileSync(releasePath, "utf8");
   const retiredEmbeddedPatterns = [
     /server:pack/,
@@ -147,39 +102,22 @@ test("release workflows use standalone Server archives and signed manifests only
     /src-tauri\/resources\/pihub-server-/,
     /prepare-server-resource\.mjs/,
   ];
-  for (const source of [ci, release, promotion]) {
-    for (const pattern of retiredEmbeddedPatterns) assert.doesNotMatch(source, pattern);
-  }
   for (const source of [ci, release]) {
-    assert.match(source, /smoke-server-resource\.mjs[\s\S]*--archive/);
+    for (const pattern of retiredEmbeddedPatterns) assert.doesNotMatch(source, pattern);
     assert.match(source, /node scripts\/verify-icon-assets\.mjs/);
   }
+  // The native smoke runs in the release build job; CI stays on ubuntu only.
+  assert.match(release, /smoke-server-resource\.mjs[\s\S]*--archive/);
 
-  const desktop = jobBlock(release, "build-desktop-release");
-  assert.match(
-    desktop,
-    /releases\/latest\/download\/pihub-desktop-v1\.json/,
-  );
-  assert.doesNotMatch(desktop, /releases\/latest\/download\/latest\.json/);
-  for (const contract of [
-    "windows-x86_64",
-    "windows-aarch64",
-    "linux-x86_64",
-    "linux-aarch64",
-    "aarch64-pc-windows-msvc",
-    "aarch64-unknown-linux-gnu",
-    "windows-11-arm",
-    "ubuntu-24.04-arm",
-  ]) {
-    assert.ok(desktop.includes(contract), `missing desktop release target contract: ${contract}`);
-  }
-  const assembly = jobBlock(release, "assemble-release");
-  assert.match(assembly, /npx --no-install tauri signer sign publish-artifacts\/pihub-desktop-v1\.json/);
-  assert.match(assembly, /node scripts\/finalize-desktop-release\.mjs --release publish-artifacts/);
+  // The desktop release chain was removed: server assets only.
+  assert.doesNotMatch(release, /build-desktop-release|assemble-release|attest-release/);
+  assert.doesNotMatch(release, /tauri signer sign|finalize-desktop-release/);
+
+  const sign = jobBlock(release, "sign-release");
+  assert.match(sign, /node scripts\/sign-server-release\.mjs server-artifacts/);
   assert.ok(
-    assembly.indexOf("tauri signer sign publish-artifacts/pihub-desktop-v1.json")
-      < assembly.indexOf("privacy-scan.mjs publish-artifacts"),
-    "the exact desktop manifest must be signed and finalized before privacy scan and upload",
+    sign.indexOf("sign-server-release.mjs server-artifacts") < sign.indexOf("privacy-scan.mjs server-artifacts"),
+    "the Server manifest must be signed before the privacy scan and upload",
   );
 });
 
@@ -187,60 +125,30 @@ test("every native Server job verifies and ships the locked default extension bu
   const ci = fs.readFileSync(ciPath, "utf8");
   const release = fs.readFileSync(releasePath, "utf8");
   const ciProduct = jobBlock(ci, "product-quality");
-  const ciNative = jobBlock(ci, "native-platforms");
   const releaseValidation = jobBlock(release, "validate");
   const releaseServer = jobBlock(release, "build-server-release");
 
-  for (const preflight of [ciProduct, ciNative, releaseValidation, releaseServer]) {
+  for (const preflight of [ciProduct, releaseValidation, releaseServer]) {
     assert.match(preflight, /extensions\/package-lock\.json/);
     assert.match(preflight, /node scripts\/default-extension-bundle\.mjs/);
   }
-  for (const job of [ciNative, releaseServer]) {
-    assertOrdered(job, [
-      "node scripts/default-extension-bundle.mjs",
-      "npm run server:build",
-      "node scripts/build-server-release.mjs",
-      "node scripts/verify-server-release.mjs --directory release-artifacts",
-      "node scripts/smoke-server-resource.mjs",
-    ], "native Server release gates are out of order");
-    for (const identity of [
-      "runner: macos-15\n            platform: darwin\n            arch: arm64",
-      "runner: macos-15-intel\n            platform: darwin\n            arch: x64",
-      "runner: ubuntu-24.04-arm\n            platform: linux\n            arch: arm64",
-      "runner: ubuntu-24.04\n            platform: linux\n            arch: x64",
-      "runner: windows-11-arm\n            platform: win32\n            arch: arm64",
-      "runner: windows-2025\n            platform: win32\n            arch: x64",
-    ]) {
-      assert.ok(job.includes(identity), `missing native Server matrix identity: ${identity}`);
-    }
+  assertOrdered(releaseServer, [
+    "node scripts/default-extension-bundle.mjs",
+    "npm run server:build",
+    "node scripts/build-server-release.mjs",
+    "node scripts/verify-server-release.mjs --directory release-artifacts",
+    "node scripts/smoke-server-resource.mjs",
+  ], "native Server release gates are out of order");
+  for (const identity of [
+    "runner: macos-15\n            platform: darwin\n            arch: arm64",
+    "runner: macos-15-intel\n            platform: darwin\n            arch: x64",
+    "runner: ubuntu-24.04-arm\n            platform: linux\n            arch: arm64",
+    "runner: ubuntu-24.04\n            platform: linux\n            arch: x64",
+    "runner: windows-11-arm\n            platform: win32\n            arch: arm64",
+    "runner: windows-2025\n            platform: win32\n            arch: x64",
+  ]) {
+    assert.ok(releaseServer.includes(identity), `missing native Server matrix identity: ${identity}`);
   }
-  assert.match(releaseValidation, /npm --prefix extensions audit --package-lock-only --omit=peer --audit-level=high/);
-});
-
-test("promotion only advances the reviewed immutable draft after complete revalidation", () => {
-  const promotion = fs.readFileSync(promotionPath, "utf8");
-  const job = jobBlock(promotion, "promote");
-  assert.match(promotion, /release_checksum_sha256:/);
-  assert.match(job, /^ {4}environment: pihub-release-promotion$/m);
-  assert.match(job, /^ {6}contents: write$/m);
-  assert.match(job, /^ {6}actions: read$/m);
-  assert.match(job, /^ {6}attestations: read$/m);
-  assert.doesNotMatch(job, /secrets\./);
-  assert.doesNotMatch(job, /tauri signer sign|sign-server-release|uploads\.github\.com|--request POST/);
-  assert.match(job, /actions\/workflows\/\$\{required_workflow\}\/runs\?head_sha=\$\{commit\}/);
-  assert.match(job, /candidate version must be strictly newer than the current stable release/i);
-  assert.match(job, /\{id, name, size, updated_at, digest\}/);
-  assert.match(job, /sha256:\$\(sha256sum/);
-  assert.match(job, /verify-release-candidate\.mjs/);
-  assert.match(job, /gh attestation verify/);
-  assert.match(job, /--method PATCH/);
-  assert.match(job, /-F draft=false -F prerelease=false -f make_latest=true/);
-  for (const asset of ["pihub-desktop-v1.json", "pihub-desktop-v1.json.sig", "release-manifest.json"]) {
-    assert.ok(job.includes(asset));
-  }
-  assert.doesNotMatch(job, /\blatest\.json(?:\.sig)?\b/);
-  assert.match(job, /for attempt in \{1\.\.12\}/);
-  assert.match(job, /assert_remote_source/);
 });
 
 test("security workflow installs locked verifier dependencies and lints workflows", () => {

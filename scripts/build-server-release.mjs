@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 
 import {
   isAuditedServerStagingPrivacyFinding,
+  pruneNonTargetPlatformModules,
   pruneServerDependencyTree,
   scanServerStagingTree,
 } from "./server-resource-privacy.mjs";
@@ -204,6 +205,10 @@ try {
     { encoding: "utf8", flag: "wx", mode: 0o644 },
   );
 
+  // The staged tree contains every platform's optional native binaries; a
+  // release archive runs on exactly one platform/arch.
+  const platformPruning = pruneNonTargetPlatformModules(stageDirectory, { platform, arch });
+
   const stagingScan = await scanServerStagingTree(stageDirectory, {
     limits: {
       maxFiles: 50_000,
@@ -324,6 +329,7 @@ try {
     + `${stagingScan.findings.length - unreviewedPrivacyFindings.length} audited upstream privacy findings; `
     + `${dependencyPruning.removedFiles} non-runtime files and `
     + `${dependencyPruning.removedDirectories} directories pruned; `
+    + `${platformPruning.length} non-target native payloads removed; `
     + `${dependencyPruning.removedWasmSections} WASM debug sections removed; `
     + `${dependencyPruning.redactedWasmDataPaths} WASM build paths redacted; `
     + `${dependencyPruning.rewrittenJavaScriptFiles} JavaScript files comment-stripped)`,
