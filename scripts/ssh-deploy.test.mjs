@@ -7,10 +7,14 @@ import test from "node:test";
 
 import {
   buildExtensionSelection,
+  buildRemoteFetchCommand,
+  buildUrlInstallCommand,
   compareVersions,
   decideAction,
+  parseArchiveUrl,
   parseProbeOutput,
   parseSetupConstants,
+  parseSidecar,
   platformFromUname,
   renderStandaloneBootstrap,
   renderUnixBootstrap,
@@ -166,4 +170,48 @@ test("decideAction distinguishes install, upgrade and blocked cases", () => {
 
   const newer = { pihubVersion: "0.0.5" };
   assert.equal(decideAction(newer, "0.0.4").action, "blocked");
+});
+
+test("parseArchiveUrl validates and splits the asset name", () => {
+  const info = parseArchiveUrl("http://100.100.100.1:10086/pihub-server-0.0.5-linux-x64.tar.gz");
+  assert.equal(info.version, "0.0.5");
+  assert.equal(info.platform, "linux");
+  assert.equal(info.arch, "x64");
+  assert.equal(info.sidecarUrl, "http://100.100.100.1:10086/pihub-server-0.0.5-linux-x64.tar.gz.sha256");
+
+  assert.throws(() => parseArchiveUrl("not-a-url"), /合法 URL/);
+  assert.throws(() => parseArchiveUrl("ftp://host/pihub-server-0.0.5-linux-x64.tar.gz"), /http/);
+  assert.throws(() => parseArchiveUrl("http://host/other.tar.gz"), /文件名不符合/);
+});
+
+test("parseSidecar enforces format and filename binding", () => {
+  const sha = "a".repeat(64);
+  assert.equal(parseSidecar(`${sha}  pihub-server-0.0.5-linux-x64.tar.gz\n`, "pihub-server-0.0.5-linux-x64.tar.gz"), sha);
+  assert.throws(() => parseSidecar(`${sha}  other.tar.gz`, "pihub-server-0.0.5-linux-x64.tar.gz"), /无效或文件名/);
+  assert.throws(() => parseSidecar("garbage", "pihub-server-0.0.5-linux-x64.tar.gz"), /无效或文件名/);
+});
+
+test("remote fetch and install commands carry url, sha256 and flags", () => {
+  const sha = "b".repeat(64);
+  const fetch = buildRemoteFetchCommand({
+    url: "http://100.100.100.1:10086/pihub-server-0.0.5-linux-x64.tar.gz",
+    sha256: sha,
+    stageDir: "/root/.pihub-update",
+  });
+  assert.ok(fetch.includes("curl -fsSL"));
+  assert.ok(fetch.includes(`${sha}  server.tgz`));
+  assert.ok(fetch.includes("sha256sum -c"));
+
+  const install = buildUrlInstallCommand({
+    stageDir: "/root/.pihub-update",
+    sha256: sha,
+    allowRoot: true,
+    autoPair: false,
+    extensionSelection: "c2Vs",
+  });
+  assert.ok(install.includes(`PIHUB_LOCAL_ARCHIVE_SHA256='${sha}'`));
+  assert.ok(install.includes("PIHUB_ALLOW_ROOT=1"));
+  assert.ok(install.includes("PIHUB_AUTO_PAIR=0"));
+  assert.ok(install.includes("--with-extensions=c2Vs"));
+  assert.ok(install.includes("pi-node/node-*/bin"));
 });

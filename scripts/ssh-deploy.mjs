@@ -151,7 +151,7 @@ const PROBE_SCRIPT = [
   'echo "PROBE_PIHUB_VERSIONS=$(ls "$HOME/.local/share/pihub/server/versions" 2>/dev/null | tr "\\n" " ")"',
   'echo "PROBE_PIHUB_RUNNING=$(curl -s --max-time 5 http://127.0.0.1:30141/api/health 2>/dev/null | sed -n \'s/.*"version"[": ]*\\([^"]*\\)".*/\\1/p\')"',
   'legacy=""',
-  'if command -v systemctl >/dev/null 2>&1 && systemctl cat pihub-server.service >/dev/null 2>&1; then legacy="pihub-server.service"; fi',
+  'if command -v systemctl >/dev/null 2>&1; then lst=$(systemctl is-active pihub-server.service 2>/dev/null); len=$(systemctl is-enabled pihub-server.service 2>/dev/null); if [ "$lst" = "active" ] || [ "$len" = "enabled" ]; then legacy="pihub-server.service"; fi; fi',
   'if ps -eo args 2>/dev/null | grep "[p]i-web" | grep -qv "pihub"; then legacy="$legacy pi-web-process"; fi',
   'echo "PROBE_LEGACY=$(echo $legacy)"',
   'if command -v tailscale >/dev/null 2>&1; then echo "PROBE_TAILSCALE=yes"; else echo "PROBE_TAILSCALE="; fi',
@@ -310,7 +310,7 @@ function runBootstrap(spec, script, archiveBytes) {
         if (pairMatch) { pairingCode = pairMatch[1]; continue; }
         const approvalMatch = line.match(/^PIHUB_SERVE_APPROVAL=(\S+)/);
         if (approvalMatch) { approvalUrl = approvalMatch[1]; continue; }
-        if (line.includes("PIHUB_BOOTSTRAP_OK")) bootstrapOk = true;
+        if (line.includes("PIHUB_BOOTSTRAP_OK") || line.includes("PIHUB_SERVER_INSTALLED") || line.includes("PIHUB_SERVER_SKIPPED")) bootstrapOk = true;
         console.log(`${prefix}${line}`);
       }
     };
@@ -323,7 +323,117 @@ function runBootstrap(spec, script, archiveBytes) {
   });
 }
 
-// ── CLI ─────────────────────────────────────────────────────────────────────
+/** --from-url 流程：远端自拉包 → 校验 → 上传渲染版 standalone bootstrap → 安装。 */
+async function deployFromUrl(spec, probe, options, { platform, arch, extensionSelection, standalone }) {
+  const urlInfo = parseArchiveUrl(options.fromUrl);
+  if (urlInfo.platform !== platform || urlInfo.arch !== arch) {
+    throw new Error(`发布包平台 ${urlInfo.platform}-${urlInfo.arch} 与远端 ${platform}-${arch} 不匹配`);
+  }
+
+  console.log("[deploy] 获取发布包校验值…");
+  const sidecarResponse = await fetch(urlInfo.sidecarUrl);
+  if (!sidecarResponse.ok) throw new Error(`校验文件获取失败：HTTP ${sidecarResponse.status}（${urlInfo.sidecarUrl}）`);
+  const sha256 = parseSidecar(await sidecarResponse.text(), urlInfo.fileName);
+
+  const decision = decideAction(probe, urlInfo.version, { force: options.force });
+  if (decision.action === "blocked") throw new Error(decision.reason);
+  console.log(`[deploy] 发布包：${urlInfo.fileName}（远端自拉，sha256 ${sha256.slice(0, 12)}…）`);
+  console.log(`[deploy] 动作：${decision.action === "install" ? "全新安装" : decision.action === "upgrade" ? `升级 ${decision.from} → ${decision.to}` : `重装 ${decision.to}`}`);
+
+  if (!options.yes && !(await confirm("[deploy] 确认继续？[y/N] "))) {
+    throw new Error("已取消");
+  }
+
+  if (options.stopLegacy && probe.legacyConflicts.includes("pihub-server.service")) {
+    console.log("[deploy] 停用旧版系统服务 pihub-server.service…");
+    await runSsh(spec, "systemctl stop pihub-server.service && systemctl disable pihub-server.service", { timeoutMs: 30_000 });
+  }
+
+  const stageDir = `${probe.home || "~"}/.pihub-update`;
+  console.log("[deploy] 远端下载并校验发布包…");
+  await runSsh(spec, buildRemoteFetchCommand({ url: options.fromUrl, sha256, stageDir }), { timeoutMs: 1900_000 });
+  console.log("[deploy] 包校验通过，上传安装器…");
+  await runSsh(spec, `cat > ${shq(`${stageDir}/bootstrap.mjs`)}`, { stdin: Buffer.from(standalone, "utf8"), timeoutMs: 300_000 });
+
+  console.log("[deploy] 执行安装（含候选健康检查与失败回滚）…");
+  const installCommand = buildUrlInstallCommand({
+    stageDir,
+    sha256,
+    allowRoot: options.allowRoot,
+    autoPair: options.autoPair,
+    extensionSelection,
+    rootBusFix: probe.uid === "0" && platform === "linux",
+  });
+  const result = await runBootstrap(spec, installCommand, null);
+  if (!result.bootstrapOk || result.code !== 0) {
+    throw new Error(`远端安装失败（退出码 ${result.code}）；旧版本已自动回滚`);
+  }
+  if (result.pairingCode) {
+    console.log("[deploy] 一次性配对码（仅此一次显示，10 分钟有效，请立即在桌面端完成配对）：");
+    console.log(`  ${result.pairingCode}`);
+  }
+  if (!probe.serveMounted) {
+    console.log("[deploy] 注意：Tailscale Serve 30141 未挂载，请在远端执行：tailscale serve --bg --https=30141 http://127.0.0.1:30141");
+  }
+
+  console.log("[deploy] 验证服务健康…");
+  const health = await runSsh(spec, "curl -s --max-time 10 http://127.0.0.1:30141/api/health", { timeoutMs: 20_000 });
+  console.log(`[deploy] 健康检查：${health.stdout.trim() || "无响应"}`);
+  console.log("[deploy] 完成");
+}
+
+// ── --from-url：远端直接从 URL 拉包 ─────────────────────────────────────────
+// 桌面机经 DERP 中转时大包上行极慢（实测 ~110KB/s），而 tailnet 机器间通常有
+// 直连。该模式让目标机自己 curl 包与校验文件，桌面只下 100 字节的 sidecar。
+
+function shq(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+export function parseArchiveUrl(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error(`--from-url 不是合法 URL：${url}`); }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("--from-url 仅支持 http/https");
+  }
+  const fileName = decodeURIComponent(path.posix.basename(parsed.pathname));
+  const match = fileName.match(/^pihub-server-(.+)-([a-z]+)-(x64|arm64)\.tar\.gz$/);
+  if (!match) throw new Error(`URL 文件名不符合 pihub-server-<version>-<platform>-<arch>.tar.gz：${fileName}`);
+  return { version: match[1], platform: match[2], arch: match[3], fileName, sidecarUrl: `${url}.sha256` };
+}
+
+export function parseSidecar(text, expectedFileName) {
+  const match = text.match(/^([a-f0-9]{64})\s+\*?(\S+)\s*$/m);
+  if (!match || match[2] !== expectedFileName) {
+    throw new Error("发布包 .sha256 校验文件无效或文件名不一致");
+  }
+  return match[1];
+}
+
+export function buildRemoteFetchCommand({ url, sha256, stageDir }) {
+  const archive = `${stageDir}/server.tgz`;
+  return [
+    `mkdir -p ${shq(stageDir)}`,
+    `curl -fsSL --connect-timeout 15 --max-time 1800 ${shq(url)} -o ${shq(archive)}`,
+    `cd ${shq(stageDir)} && { echo "${sha256}  server.tgz" | sha256sum -c - 2>/dev/null || echo "${sha256}  server.tgz" | shasum -a 256 -c -; }`,
+  ].join(" && ");
+}
+
+export function buildUrlInstallCommand({ stageDir, sha256, allowRoot, autoPair, extensionSelection, rootBusFix = false }) {
+  const pathSetup = 'for d in "$HOME"/.local/share/pi-node/node-*/bin; do [ -d "$d" ] && PATH="$d:$PATH"; done; export PATH="$HOME/.local/bin:$PATH"';
+  // root 经 tailscale ssh 没有 session bus；linger + user@0 + XDG/DBUS 是幂等修复。
+  const busSetup = 'systemctl start user@$(id -u).service 2>/dev/null; loginctl enable-linger 2>/dev/null; export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"; ';
+  const env = [
+    `PIHUB_LOCAL_ARCHIVE=${shq(`${stageDir}/server.tgz`)}`,
+    `PIHUB_LOCAL_ARCHIVE_SHA256=${shq(sha256)}`,
+    `PIHUB_ALLOW_ROOT=${allowRoot ? "1" : "0"}`,
+    `PIHUB_AUTO_PAIR=${autoPair ? "1" : "0"}`,
+  ].join(" ");
+  const args = extensionSelection ? ` --with-extensions=${extensionSelection}` : "";
+  return `${pathSetup} && ${rootBusFix ? busSetup : ""}env ${env} node ${shq(`${stageDir}/bootstrap.mjs`)}${args}`;
+}
+
+
 
 function parseArgs(argv) {
   const options = {
@@ -334,6 +444,7 @@ function parseArgs(argv) {
     autoPair: false,
     archive: null,
     archiveDir: path.join(REPO_ROOT, "release-artifacts"),
+    fromUrl: null,
     extensions: null,
     stopLegacy: false,
     force: false,
@@ -348,6 +459,7 @@ function parseArgs(argv) {
     else if (arg === "--auto-pair") options.autoPair = true;
     else if (arg === "--archive") options.archive = argv[++i];
     else if (arg === "--archive-dir") options.archiveDir = path.resolve(argv[++i]);
+    else if (arg === "--from-url") options.fromUrl = argv[++i];
     else if (arg === "--extensions") options.extensions = argv[++i].split(",").map((s) => s.trim()).filter(Boolean);
     else if (arg === "--stop-legacy") options.stopLegacy = true;
     else if (arg === "--force") options.force = true;
@@ -366,7 +478,7 @@ function parseArgs(argv) {
 
 function printUsage() {
   console.log("用法：node scripts/ssh-deploy.mjs <[user@]host> [--user root] [--plain-ssh] [--allow-root]");
-  console.log("      [--auto-pair] [--archive file] [--archive-dir dir] [--extensions a,b]");
+  console.log("      [--auto-pair] [--archive file] [--archive-dir dir] [--from-url url] [--extensions a,b]");
   console.log("      [--stop-legacy] [--force] [--check] [--yes]");
 }
 
@@ -421,6 +533,14 @@ async function main() {
     throw new Error("检测到旧版系统服务 pihub-server.service；确认停用后加 --stop-legacy");
   }
 
+  const extensionSelection = buildExtensionSelection(options.extensions, extensionPackages);
+  const standalone = renderStandaloneBootstrap(standaloneTemplate, constants, extensionPackages);
+
+  if (options.fromUrl) {
+    await deployFromUrl(spec, probe, options, { platform, arch, extensionSelection, standalone });
+    return;
+  }
+
   // 发布包
   const archive = options.archive
     ? selectSpecificArchive(options.archive, platform, arch)
@@ -440,8 +560,6 @@ async function main() {
     await runSsh(spec, "systemctl stop pihub-server.service && systemctl disable pihub-server.service", { timeoutMs: 30_000 });
   }
 
-  const extensionSelection = buildExtensionSelection(options.extensions, extensionPackages);
-  const standalone = renderStandaloneBootstrap(standaloneTemplate, constants, extensionPackages);
   const script = renderUnixBootstrap(unixTemplate, standalone, {
     constants,
     extensionSelection,
