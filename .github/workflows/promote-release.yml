@@ -109,9 +109,16 @@ jobs:
 
           assert_remote_source
           for required_workflow in ci.yml security.yml; do
+            # CI runs on every push to main; Security is manual
+            # (workflow_dispatch) to fit the Actions budget — accept both.
+            if [[ "${required_workflow}" == "security.yml" ]]; then
+              event_filter='.event == "push" or .event == "merge_group" or .event == "workflow_dispatch"'
+            else
+              event_filter='.event == "push" or .event == "merge_group"'
+            fi
             runs="$(gh api --paginate --slurp \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/${required_workflow}/runs?head_sha=${commit}&per_page=100" \
-              | jq -c '[.[].workflow_runs[] | select(.head_sha == $commit and (.event == "push" or .event == "merge_group"))]' \
+              | jq -c "[.[].workflow_runs[] | select(.head_sha == \$commit and (${event_filter}))]" \
                 --arg commit "${commit}")"
             jq -e 'length > 0 and (sort_by(.run_number, .run_attempt) | last | .status == "completed" and .conclusion == "success")' \
               <<<"${runs}" >/dev/null
