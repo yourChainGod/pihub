@@ -1,4 +1,4 @@
-import type { AttachedImage, Device, DeviceCredentialStatus, DeviceStatus, NewRemoteSession, RemoteAgentEventPayload, RemoteAgentState, RemoteDirectoryBrowse, RemoteDirectoryListing, RemoteFilePreview, RemoteGitDiff, RemoteGitStatus, RemoteModelsResponse, RemoteNewApiConfig, RemotePluginPackageInfo, RemotePluginsResponse, RemoteProjectTrustStatus, RemoteServerUpdateAccepted, RemoteSession, RemoteSetupStatus, RemoteSkillInfo, RemoteSkillsResponse, RemoteTerminalEventPayload, RemoteUpdates, RemoteWorktrees, SessionDetail, TailnetScan } from "./types.ts";
+import type { AttachedImage, Device, DeviceCredentialStatus, DeviceStatus, NewRemoteSession, RemoteAgentEventPayload, RemoteAgentState, RemoteDirectoryBrowse, RemoteDirectoryListing, RemoteFilePreview, RemoteGitDiff, RemoteGitStatus, RemoteModelsResponse, RemoteNewApiConfig, RemotePermissionRule, RemotePermissionsResponse, RemotePluginPackageInfo, RemotePluginsResponse, RemoteProjectTrustStatus, RemoteServerUpdateAccepted, RemoteSession, RemoteSetupStatus, RemoteSkillInfo, RemoteSkillsResponse, RemoteSubagentsResponse, RemoteTerminalEventPayload, RemoteTodosResponse, RemoteUpdates, RemoteWorktrees, SessionDetail, TailnetScan, RemoteComponents, RemoteComponentUpdateAccepted } from "./types.ts";
 import { invokeDesktop, isDesktopEnvironment, listenDesktopEvent } from "./desktopTransport.ts";
 
 const inTauri = isDesktopEnvironment;
@@ -490,6 +490,40 @@ export async function applyRemoteServerUpdate(device: Device, force = false): Pr
   }
 }
 
+/** Reads per-layer component versions (Server / Pi / extensions) from the device. */
+export async function loadRemoteComponents(device: Device): Promise<RemoteComponents> {
+  return remote(device, "/api/pihub/components");
+}
+
+/**
+ * Queues a Pi Agent or extension update on the device.
+ *
+ * Running agent sessions make the server answer 409 `busy` unless `force` is
+ * set, matching the server-update contract; callers surface a confirmation and
+ * retry with force so the operator decides whether to interrupt the sessions.
+ */
+export async function applyRemoteComponentUpdate(
+  device: Device,
+  component: "pi" | "extensions",
+  options: { force?: boolean; target?: string } = {},
+): Promise<RemoteComponentUpdateAccepted> {
+  const { force = false, target } = options;
+  try {
+    return await remote(device, "/api/pihub/components", "POST", {
+      component,
+      action: "update",
+      ...(target ? { target } : {}),
+      ...(force ? { force: true } : {}),
+    });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    if (/busy|concurrent[_ ]update|sessions? (?:are )?still running|正在运行/i.test(message)) {
+      throw new BusyUpdateError(message, []);
+    }
+    throw cause;
+  }
+}
+
 export async function bundledVersions(): Promise<{ pihubServer: string; app: string }> {
   if (inTauri()) return invokeDesktop("bundled_versions");
   return { pihubServer: "dev", app: "dev" };
@@ -532,4 +566,36 @@ export function deviceId(value: string): string {
   let hash = 2166136261;
   for (const char of value) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
   return `device-${(hash >>> 0).toString(36)}`;
+}
+
+/**
+ * Reads the pi-todo-rail list for a session. The list is parsed out of the
+ * session transcript, so it always matches what the agent's own todo panel
+ * shows — including per-branch state.
+ */
+export async function loadRemoteTodos(device: Device, sessionId: string): Promise<RemoteTodosResponse> {
+  return remote(device, `/api/pihub/todos?sessionId=${encodeURIComponent(sessionId)}`);
+}
+
+export async function loadRemotePermissions(device: Device): Promise<RemotePermissionsResponse> {
+  return remote(device, "/api/pihub/permissions");
+}
+
+export async function addRemotePermissionRule(
+  device: Device,
+  rule: RemotePermissionRule,
+): Promise<RemotePermissionsResponse> {
+  return remote(device, "/api/pihub/permissions", "POST", rule);
+}
+
+/** Removes a PiHub-owned rule. Rules with `pi-native` scope are read-only. */
+export async function removeRemotePermissionRule(
+  device: Device,
+  pattern: string,
+): Promise<RemotePermissionsResponse> {
+  return remote(device, "/api/pihub/permissions", "DELETE", { pattern });
+}
+
+export async function loadRemoteSubagents(device: Device, sessionId: string): Promise<RemoteSubagentsResponse> {
+  return remote(device, `/api/pihub/subagents?sessionId=${encodeURIComponent(sessionId)}`);
 }

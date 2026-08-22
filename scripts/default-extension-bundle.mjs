@@ -12,7 +12,7 @@ const repositoryRoot = path.resolve(import.meta.dirname, "..");
 export const DEFAULT_EXTENSION_SOURCE_DIRECTORY = path.join(repositoryRoot, "extensions");
 export const DEFAULT_EXTENSION_NOTICE_FILE = "THIRD_PARTY_NOTICES.extensions.txt";
 export const DEFAULT_EXTENSION_INVENTORY_SCHEMA_VERSION = 1;
-export const DEFAULT_EXTENSION_LOCK_SHA256 = "7180bd9132d0f8cba90c70bb3c998b94731396f3deff9b70c047773fbcf40683";
+export const DEFAULT_EXTENSION_LOCK_SHA256 = "8b4b96f899c6b2434934329e27941c616368425f9f8da38af7971cfd808146d2";
 export const DEFAULT_EXTENSION_PACKAGES = Object.freeze([
   Object.freeze({ name: "@cortexkit/pi-magic-context", version: "0.38.0" }),
   Object.freeze({ name: "pi-todo-rail", version: "0.2.3" }),

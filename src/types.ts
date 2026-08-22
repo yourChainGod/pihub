@@ -128,6 +128,10 @@ export interface RemoteUiRequest {
   widgetPlacement?: "aboveEditor" | "belowEditor";
   /** set_editor_text: text the extension wants in the composer. */
   text?: string;
+  /** ask: pi-ask structured flow (native panel); only flowId is set on close. */
+  ask?: RemoteAskFlow;
+  /** ask: the previous submit was rejected; the panel reopens with this note. */
+  error?: string;
 }
 
 export interface RemoteWidgetItem {
@@ -135,6 +139,43 @@ export interface RemoteWidgetItem {
   lines: string[];
   placement?: "aboveEditor" | "belowEditor";
 }
+
+/** pi-ask structured ask flow bridged from the extension event bus. */
+export interface RemoteAskOption {
+  value: string;
+  label: string;
+  description?: string;
+  preview?: string;
+  recommended?: boolean;
+  freeform?: boolean;
+}
+
+export interface RemoteAskQuestion {
+  id: string;
+  label: string;
+  prompt: string;
+  type: "single" | "multi" | "preview";
+  presentedType?: "single" | "multi" | "preview";
+  required: boolean;
+  options: RemoteAskOption[];
+}
+
+export interface RemoteAskFlow {
+  flowId: string;
+  title?: string;
+  source?: string;
+  questions?: RemoteAskQuestion[];
+}
+
+export type RemoteAskAnswer = {
+  values?: string[];
+  customText?: string;
+  note?: string;
+};
+
+export type RemoteAskResponse =
+  | { kind: "answer"; answers: Record<string, RemoteAskAnswer>; mode?: "submit" | "elaborate" }
+  | { kind: "cancel" };
 
 export interface RemoteContextUsage {
   percent: number | null;
@@ -399,4 +440,94 @@ export interface RemoteServerUpdateAccepted {
   accepted: true;
   operationId: string;
   update: RemoteServerUpdateState & { phase: "queued"; operationId: string };
+}
+
+/** Per-layer component versions reported by GET /api/pihub/components. */
+export interface RemoteComponents {
+  server: {
+    current: string;
+    mode: "ipc" | "legacy";
+  };
+  pi: {
+    current: string | null;
+    available: boolean;
+    binary: string;
+  };
+  extensions: {
+    items: Array<{ name: string; version: string }>;
+    count: number;
+    managedBy: "pi";
+  };
+  checkedAt: string;
+}
+
+/** POST /api/pihub/components starts a background job and returns its id. */
+export interface RemoteComponentUpdateAccepted {
+  accepted: true;
+  jobId: string;
+}
+
+export type RemoteComponentJobStatus = "running" | "done" | "failed";
+
+export interface RemoteComponentJob {
+  status: RemoteComponentJobStatus;
+  output: string;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+/**
+ * A todo owned by the pi-todo-rail extension. Ids are per-session and
+ * branch-aware; the list lives in the session transcript, not a side file.
+ */
+export interface RailTodo {
+  id: number;
+  text: string;
+  done: boolean;
+  note?: string;
+}
+
+export interface RailSnapshot {
+  version: 2;
+  todos: RailTodo[];
+  nextId: number;
+}
+
+/** GET /api/pihub/todos */
+export interface RemoteTodosResponse {
+  snapshot: RailSnapshot;
+  readAt: string;
+}
+
+/** A permission rule. `pi-native` scope means it came from Pi and is read-only. */
+export interface RemotePermissionRule {
+  pattern: string;
+  action: "allow" | "deny" | "ask";
+  scope?: string;
+}
+
+/** GET/POST/DELETE /api/pihub/permissions */
+export interface RemotePermissionsResponse {
+  rules: RemotePermissionRule[];
+  readAt?: string;
+}
+
+export type RemoteSubagentStatus = "running" | "completed" | "failed" | "aborted";
+
+export interface RemoteSubagent {
+  id: string;
+  name: string;
+  status: RemoteSubagentStatus;
+  startedAt?: string;
+  finishedAt?: string;
+  description?: string;
+  error?: string;
+}
+
+/** GET /api/pihub/subagents — polled by the client. */
+export interface RemoteSubagentsResponse {
+  subagents: RemoteSubagent[];
+  activeCount: number;
+  totalCount: number;
+  readAt: string;
 }

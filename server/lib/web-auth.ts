@@ -11,14 +11,14 @@ function secretsEqual(actual: string, expected: string): boolean {
 }
 
 export function isWebPasswordEnabled(
-  password: string | undefined = process.env.PI_WEB_PASSWORD,
+  password: string | undefined = process.env.PIHUB_SERVER_PASSWORD ?? process.env.PI_WEB_PASSWORD,
 ): password is string {
   return typeof password === "string" && password.length > 0;
 }
 
 export function isValidBasicAuthorization(
   authorization: string | null,
-  password = process.env.PI_WEB_PASSWORD,
+  password = process.env.PIHUB_SERVER_PASSWORD ?? process.env.PI_WEB_PASSWORD,
 ): boolean {
   if (!isWebPasswordEnabled(password) || !authorization) return false;
 

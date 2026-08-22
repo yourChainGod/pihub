@@ -84,7 +84,7 @@ app/page.tsx                     minimal status page
 proxy.ts                         Host/Origin and API authentication boundary
 instrumentation.ts               Pi runtime startup integration
 
-bin/pi-web.js                    stable supervisor entry point; filename retained for compatibility
+bin/pihub-server.js             stable supervisor entry point
 bin/server-supervisor.js         child lifecycle, IPC and update orchestration
 bin/pihub-server-install.js      service install/status/repair/logs/uninstall
 bin/pihub-server-install-windows.ps1
@@ -132,6 +132,6 @@ docs/adr/                        retained architecture decisions
 ## 文档与兼容
 
 - 用户文档以仓库根 [`../README.md`](../README.md) 和本目录 [`README.md`](README.md) 为准。
-- `bin/pi-web.js` 入口文件名、部分 `PI_WEB_*` 内部兼容变量和上游源码文件名暂时保留，不表示重新提供 Pi Web 浏览器产品；公开 CLI 不提供 `pi-web` 别名。
+- 服务端入口为 `bin/pihub-server.js`；`PIHUB_SERVER_HOSTNAME`、`PIHUB_SERVER_NO_OPEN`、`PIHUB_SERVER_ALLOWED_HOSTS`、`PIHUB_SERVER_PASSWORD` 是首选环境变量，旧 `PI_WEB_*` 变量仅作为兼容 fallback（新变量未设置时才读取），上游源码文件名暂时保留，不表示重新提供 Pi Web 浏览器产品；公开 CLI 不提供 `pi-web` 别名。
 - 新的用户可见命令必须先有实现和测试，再写入文档。
 - 跨平台路径、进程、服务和终端逻辑要在 macOS、Windows、Linux 的原生 runner 验证；在一个平台上的 mock 不能代替安装测试。

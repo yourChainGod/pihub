@@ -1,0 +1,34 @@
+{
+  "name": "@pihub/core-extensions",
+  "version": "0.1.0",
+  "description": "PiHub 核心插件集合 - 默认扩展包",
+  "private": false,
+  "author": "PiHub Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourChainGod/pihub.git",
+    "directory": "packages/core-extensions"
+  },
+  "keywords": [
+    "pihub",
+    "pi-agent",
+    "extensions",
+    "plugins"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.2"
+  },
+  "dependencies": {
+    "@cortexkit/pi-magic-context": "^0.38.0",
+    "pi-todo-rail": "^0.2.3",
+    "@gotgenes/pi-permission-system": "^26.3.0",
+    "@eko24ive/pi-ask": "^1.2.0",
+    "@gotgenes/pi-subagents": "^19.3.2"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "postinstall": "echo '\n✅ PiHub core extensions installed successfully!\n   Run: pi list --packages to verify\n'"
+  },
+  "readme": "# @pihub/core-extensions\n\nPiHub 核心插件集合。安装此包会自动安装所有必需的 Pi 扩展。\n\n## 安装\n\n```bash\npi install @pihub/core-extensions\n```\n\n## 包含的扩展\n\n- `@cortexkit/pi-magic-context` - 智能上下文管理\n- `pi-todo-rail` - 待办事项轨道\n- `@gotgenes/pi-permission-system` - 权限系统\n- `@eko24ive/pi-ask` - 交互式提问\n- `@gotgenes/pi-subagents` - 子代理支持\n\n## 配置\n\n详见 PiHub 文档：https://github.com/yourChainGod/pihub\n"
+}

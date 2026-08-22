@@ -80,7 +80,7 @@ function defaultEntries() {
     { path: "pihub/", kind: "directory", size: 0, mode: 0o755 },
     { path: "pihub/bin/", kind: "directory", size: 0, mode: 0o755 },
     {
-      path: "pihub/bin/pi-web.js",
+      path: "pihub/bin/pihub-server.js",
       kind: "file",
       size: 20,
       compressedSize: 10,

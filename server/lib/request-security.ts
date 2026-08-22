@@ -41,10 +41,12 @@ function isTailscaleIpv6(hostname: string): boolean {
 }
 
 function configuredHostnamesFromEnvironment(): string[] {
+  // PIHUB_SERVER_* is preferred; PI_WEB_* remains as a legacy fallback.
+  const allowedHosts = process.env.PIHUB_SERVER_ALLOWED_HOSTS ?? process.env.PI_WEB_ALLOWED_HOSTS;
   return [
-    process.env.PI_WEB_HOSTNAME,
+    process.env.PIHUB_SERVER_HOSTNAME ?? process.env.PI_WEB_HOSTNAME,
     process.env.PIHUB_TAILNET_HOSTNAME,
-    ...(process.env.PI_WEB_ALLOWED_HOSTS?.split(",") ?? []),
+    ...(allowedHosts?.split(",") ?? []),
   ].filter((value): value is string => Boolean(value?.trim()));
 }
 

@@ -105,7 +105,7 @@ function runtimeEntries({ extensions = false } = {}) {
     ["node_modules/next/dist/bin/next", "module.exports = {};\n"],
     [`node_modules/${PI_AGENT}/package.json`, JSON.stringify({ name: PI_AGENT, version: PI_AGENT_VERSION })],
     [`node_modules/${PI_AGENT}/dist/cli.js`, "console.log('0.84.2');\n"],
-    ["bin/pi-web.js", "#!/usr/bin/env node\n"],
+    ["bin/pihub-server.js", "#!/usr/bin/env node\n"],
     ["bin/runtime-entry.js", "#!/usr/bin/env node\n"],
     ["bin/pihub-server-install.js", "#!/usr/bin/env node\n"],
   ]);

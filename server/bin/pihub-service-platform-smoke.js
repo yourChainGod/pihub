@@ -202,7 +202,7 @@ async function runNativeServiceSmoke({
   platform = process.platform,
   uid = typeof process.getuid === "function" ? process.getuid() : undefined,
   nodePath = process.execPath,
-  serverPath = path.join(__dirname, "pi-web.js"),
+  serverPath = path.join(__dirname, "pihub-server.js"),
   expectedVersion = packageMetadata.version,
   environmentPath = process.env.PATH || "",
   runner = runNativeCommand,

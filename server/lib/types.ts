@@ -111,6 +111,47 @@ export interface BashExecutionMessage {
 
 export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage | CustomMessage | BashExecutionMessage;
 
+// pi-ask (@eko24ive/pi-ask) remote-ask view model, bridged from the shared
+// extension event bus so the frontend can render a native ask panel instead
+// of the headless TUI character frame.
+export interface AskFlowOption {
+  value: string;
+  label: string;
+  description?: string;
+  preview?: string;
+  recommended?: boolean;
+  freeform?: boolean;
+}
+
+export interface AskFlowQuestion {
+  id: string;
+  label: string;
+  prompt: string;
+  type: "single" | "multi" | "preview";
+  presentedType?: "single" | "multi" | "preview";
+  required: boolean;
+  options: AskFlowOption[];
+}
+
+export interface AskFlowPayload {
+  flowId: string;
+  title?: string;
+  source?: string;
+  /** Absent on `closed` notifications. */
+  questions?: AskFlowQuestion[];
+}
+
+export type AskFlowAnswer = {
+  values?: string[];
+  customText?: string;
+  note?: string;
+  optionNotes?: Record<string, string>;
+};
+
+export type AskFlowResponse =
+  | { kind: "answer"; answers: Record<string, AskFlowAnswer>; mode?: "submit" | "elaborate" }
+  | { kind: "cancel" };
+
 export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
@@ -188,6 +229,15 @@ export type ExtensionUiRequest =
       method: "custom";
       lines: string[];
       closed?: boolean;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
+      method: "ask";
+      ask: AskFlowPayload;
+      /** Set when pi-ask rejected the previous submit; reopen with this note. */
+      error?: string;
+      closed?: boolean;
     };
 
 export type BlockingExtensionUiRequest = Extract<
@@ -198,7 +248,8 @@ export type BlockingExtensionUiRequest = Extract<
 export type ExtensionUiResponse =
   | { type: "extension_ui_response"; id: string; value: string }
   | { type: "extension_ui_response"; id: string; confirmed: boolean }
-  | { type: "extension_ui_response"; id: string; cancelled: true };
+  | { type: "extension_ui_response"; id: string; cancelled: true }
+  | { type: "extension_ui_response"; id: string; ask: AskFlowResponse };
 
 export interface ExtensionStatusItem {
   key: string;

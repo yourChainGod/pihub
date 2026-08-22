@@ -693,6 +693,7 @@ test("spawned releases receive required configuration but no base-environment se
       HOME: "/home/pi",
       PATH: "/safe/bin",
       PI_WEB_PASSWORD: "required-server-password",
+      PIHUB_SERVER_PASSWORD: "required-pihub-server-password",
       PIHUB_AUTH_STATE_PATH: "/home/pi/.pihub/auth.json",
       PIHUB_SERVER_ROOT: "/attacker/root",
       PIHUB_SERVER_VERSION: "999.0.0",
@@ -723,7 +724,9 @@ test("spawned releases receive required configuration but no base-environment se
   assert.equal(spawnOptions.options.env.NODE_ENV, "production");
   assert.equal(spawnOptions.options.env.PATH, "/safe/bin");
   assert.equal(spawnOptions.options.env.PI_WEB_PASSWORD, "required-server-password");
+  assert.equal(spawnOptions.options.env.PIHUB_SERVER_PASSWORD, "required-pihub-server-password");
   assert.equal(spawnOptions.options.env.PIHUB_AUTH_STATE_PATH, "/home/pi/.pihub/auth.json");
+  assert.equal(spawnOptions.options.env.PIHUB_SERVER_HOSTNAME, "127.0.0.1");
   assert.equal(spawnOptions.options.env.PI_WEB_HOSTNAME, "127.0.0.1");
   assert.equal(spawnOptions.options.env.PIHUB_SERVER_ROOT, packageRoot);
   assert.equal(spawnOptions.options.env.PIHUB_SERVER_VERSION, TARGET_VERSION);

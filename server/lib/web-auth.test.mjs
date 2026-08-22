@@ -48,3 +48,27 @@ test("does not authenticate when password protection is disabled", async () => {
   assert.equal(isValidBasicAuthorization(authorization("pi", ""), ""), false);
   assert.equal(isValidBasicAuthorization(authorization("pi", "secret"), undefined), false);
 });
+
+test("prefers PIHUB_SERVER_PASSWORD and falls back to legacy PI_WEB_PASSWORD", async (t) => {
+  const { isValidBasicAuthorization, isWebPasswordEnabled } = await loadSubject();
+  const saved = {
+    PIHUB_SERVER_PASSWORD: process.env.PIHUB_SERVER_PASSWORD,
+    PI_WEB_PASSWORD: process.env.PI_WEB_PASSWORD,
+  };
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  delete process.env.PIHUB_SERVER_PASSWORD;
+  process.env.PI_WEB_PASSWORD = "legacy-secret";
+  assert.equal(isWebPasswordEnabled(), true);
+  assert.equal(isValidBasicAuthorization(authorization("pi", "legacy-secret")), true);
+
+  // The preferred variable wins when both are set.
+  process.env.PIHUB_SERVER_PASSWORD = "new-secret";
+  assert.equal(isValidBasicAuthorization(authorization("pi", "new-secret")), true);
+  assert.equal(isValidBasicAuthorization(authorization("pi", "legacy-secret")), false);
+});

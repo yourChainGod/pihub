@@ -57,3 +57,6 @@ HANDOFF.md
 instruction.dev.md
 autoresearch-*
 research-results.tsv
+
+# Internal handoff/worklog docs stay local, not pushed to the public repo
+docs/

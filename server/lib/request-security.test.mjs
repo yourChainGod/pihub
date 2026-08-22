@@ -173,6 +173,42 @@ test("rejects DNS rebinding even when browser headers say same-origin", async ()
   assert.equal(isApiRequestAllowed(request), false);
 });
 
+test("reads PIHUB_SERVER_* host configuration with legacy PI_WEB_* fallback", async (t) => {
+  const { isApiRequestAllowed } = await loadSubject();
+  const keys = [
+    "PIHUB_SERVER_ALLOWED_HOSTS",
+    "PIHUB_SERVER_HOSTNAME",
+    "PI_WEB_ALLOWED_HOSTS",
+    "PI_WEB_HOSTNAME",
+  ];
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+  const requestFor = (host) => new Request("http://localhost:30141/api/test", {
+    headers: { host: `${host}:30141` },
+  });
+
+  // Legacy variables still apply when the preferred ones are unset.
+  delete process.env.PIHUB_SERVER_ALLOWED_HOSTS;
+  delete process.env.PIHUB_SERVER_HOSTNAME;
+  process.env.PI_WEB_ALLOWED_HOSTS = "legacy.example";
+  process.env.PI_WEB_HOSTNAME = "legacy-host.example";
+  assert.equal(isApiRequestAllowed(requestFor("legacy.example")), true);
+  assert.equal(isApiRequestAllowed(requestFor("legacy-host.example")), true);
+
+  // The preferred variables win when both are set.
+  process.env.PIHUB_SERVER_ALLOWED_HOSTS = "new.example";
+  process.env.PIHUB_SERVER_HOSTNAME = "new-host.example";
+  assert.equal(isApiRequestAllowed(requestFor("new.example")), true);
+  assert.equal(isApiRequestAllowed(requestFor("new-host.example")), true);
+  assert.equal(isApiRequestAllowed(requestFor("legacy.example")), false);
+  assert.equal(isApiRequestAllowed(requestFor("legacy-host.example")), false);
+});
+
 test("rejects missing, malformed, and unconfigured Host headers", async () => {
   const { isApiRequestAllowed } = await loadSubject();
   assert.equal(isApiRequestAllowed(new Request("http://localhost:30141/api/test")), false);

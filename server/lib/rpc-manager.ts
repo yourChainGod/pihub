@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createAgentSessionFromServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createEventBus, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, unlinkSync, writeFileSync } from "fs";
@@ -17,8 +17,12 @@ import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trus
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { createNewApiProviderExtension } from "./newapi-provider";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import type { EventBus } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type {
+  AskFlowPayload,
+  AskFlowQuestion,
+  AskFlowResponse,
   ExtensionUiRequest,
   ExtensionUiResponse,
   ExtensionWidgetItem,
@@ -33,6 +37,30 @@ import {
   SessionOwnershipConflictError,
 } from "./session-ownership";
 import { createSafeAgentSessionServices } from "./safe-model-runtime";
+import { initializeExtensions, cleanupExtensions, type InitializedExtensions } from "./extensions-init";
+
+// ============================================================================
+// Extensions initialization (lazy, once per process)
+// ============================================================================
+
+let _extensionsInitialized: Promise<InitializedExtensions> | null = null;
+
+function ensureExtensionsInitialized(agentDir?: string): Promise<InitializedExtensions> {
+  if (!_extensionsInitialized) {
+    _extensionsInitialized = initializeExtensions({ agentDir }).catch((err) => {
+      _extensionsInitialized = null;
+      console.error("[rpc-manager] Extensions initialization failed:", err);
+      throw err;
+    });
+    const cleanup = () => {
+      try { cleanupExtensions(); } catch { /* ignore */ }
+    };
+    process.once("exit", cleanup);
+    process.once("SIGINT", cleanup);
+    process.once("SIGTERM", cleanup);
+  }
+  return _extensionsInitialized;
+}
 
 // ============================================================================
 // Types
@@ -78,6 +106,8 @@ type ActiveCustomUi = {
   width: number;
   resolve: (value: unknown) => void;
   settled: boolean;
+  /** pi-ask's character frame, superseded by the native ask panel. */
+  suppressed: boolean;
 };
 
 type ExtensionUiRequestBody = Record<string, unknown> & {
@@ -221,6 +251,72 @@ class PlainTextTheme extends Theme {
 const PLAIN_TEXT_THEME = new PlainTextTheme();
 const CUSTOM_UI_KEYBINDINGS = new TuiKeybindingsManager(TUI_KEYBINDINGS);
 
+// pi-ask (@eko24ive/pi-ask) remote-ask protocol channels on the shared
+// extension event bus (pi.events). The extension emits started/completed with
+// a structured view model and resolves flows via submit events, so PiHub can
+// render a native ask panel instead of the headless TUI character frame.
+const PI_ASK_STARTED_EVENT = "@eko24ive/pi-ask:started";
+const PI_ASK_COMPLETED_EVENT = "@eko24ive/pi-ask:completed";
+const PI_ASK_SUBMIT_EVENT = "@eko24ive/pi-ask:submit";
+const PI_ASK_SUBMIT_RESULT_EVENT = "@eko24ive/pi-ask:submit-result";
+
+function askEventFlowId(data: unknown): string | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const flowId = (data as { flowId?: unknown }).flowId;
+  return typeof flowId === "string" && flowId ? flowId : undefined;
+}
+
+function normalizeAskStartedEvent(data: unknown): (AskFlowPayload & { flowId: string }) | null {
+  if (!data || typeof data !== "object") return null;
+  const raw = data as Record<string, unknown>;
+  const flowId = askEventFlowId(data);
+  if (!flowId || !Array.isArray(raw.questions)) return null;
+  const questions: AskFlowQuestion[] = [];
+  for (const item of raw.questions) {
+    if (!item || typeof item !== "object") return null;
+    const question = item as Record<string, unknown>;
+    if (typeof question.id !== "string" || typeof question.prompt !== "string") return null;
+    if (!Array.isArray(question.options)) return null;
+    const options = question.options.map((option) => {
+      const o = (option ?? {}) as Record<string, unknown>;
+      return {
+        value: typeof o.value === "string" ? o.value : String(o.value ?? ""),
+        label: typeof o.label === "string" ? o.label : String(o.value ?? ""),
+        ...(typeof o.description === "string" ? { description: o.description } : {}),
+        ...(typeof o.preview === "string" ? { preview: o.preview } : {}),
+        ...(o.recommended === true ? { recommended: true } : {}),
+        ...(o.freeform === true ? { freeform: true } : {}),
+      };
+    });
+    const type = question.type === "multi" || question.type === "preview" ? question.type : "single";
+    questions.push({
+      id: question.id,
+      label: typeof question.label === "string" ? question.label : question.id,
+      prompt: question.prompt,
+      type,
+      ...(question.presentedType === "single" || question.presentedType === "multi" || question.presentedType === "preview"
+        ? { presentedType: question.presentedType }
+        : {}),
+      required: question.required === true,
+      options,
+    });
+  }
+  return {
+    flowId,
+    ...(typeof raw.title === "string" ? { title: raw.title } : {}),
+    ...(typeof raw.source === "string" ? { source: raw.source } : {}),
+    questions,
+  };
+}
+
+function sanitizeAskFlowResponse(data: unknown): AskFlowResponse {
+  if (data && typeof data === "object") {
+    const kind = (data as { kind?: unknown }).kind;
+    if (kind === "answer" || kind === "cancel") return data as AskFlowResponse;
+  }
+  return { kind: "cancel" };
+}
+
 function withExtensionTools(session: AgentSessionLike, toolNames: string[]): string[] {
   if (toolNames.length === 0) return [];
 
@@ -263,6 +359,13 @@ export class AgentSessionWrapper {
   private _lifecycleState: RpcSessionLifecycleState;
   private readonly readinessTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
+  private readonly extensionEvents: EventBus | null;
+  private extensionEventUnsubscribes: Array<() => void> = [];
+  /** Native ask panels keyed by UI request id; value is the started payload. */
+  private pendingAskFlows = new Map<string, AskFlowPayload & { flowId: string }>();
+  private askFlowRequestIds = new Map<string, string>();
+  /** pi-ask mounts its TUI custom UI right after starting a remote flow. */
+  private suppressNextCustomUi = 0;
 
   constructor(
     public readonly inner: AgentSessionLike,
@@ -271,6 +374,7 @@ export class AgentSessionWrapper {
       initialState?: "starting" | "ready";
       startupTimeoutMs?: number;
       shutdownTimeoutMs?: number;
+      extensionEvents?: EventBus;
     } = {},
   ) {
     this.ownerId = options.ownerId ?? "legacy-server";
@@ -283,6 +387,8 @@ export class AgentSessionWrapper {
       options.shutdownTimeoutMs,
       DEFAULT_RPC_SHUTDOWN_TIMEOUT_MS,
     );
+    this.extensionEvents = options.extensionEvents ?? null;
+    if (this.extensionEvents) this.attachExtensionAskBridge(this.extensionEvents);
   }
 
   readonly ownerId: string;
@@ -344,7 +450,7 @@ export class AgentSessionWrapper {
       if (this._lifecycleState === "starting") this._lifecycleState = "ready";
     }).catch((err) => {
       if (this._lifecycleState === "draining" || this.disposed) return;
-      console.error("[pi-web] failed to dispatch session_start to extensions:", err instanceof Error ? err.message : err);
+      console.error("[pihub-server] failed to dispatch session_start to extensions:", err instanceof Error ? err.message : err);
       this.destroy("failed");
     });
   }
@@ -403,7 +509,7 @@ export class AgentSessionWrapper {
             id: randomUUID(),
             method: "notify",
             notifyType: "warning",
-            message: "Extension requested shutdown, but shutdown is not supported in Pi Web.",
+            message: "Extension requested shutdown, but shutdown is not supported in PiHub.",
           } as ExtensionUiRequest as AgentEvent),
           onError: (error) => this.emit({
             type: "extension_error",
@@ -417,7 +523,7 @@ export class AgentSessionWrapper {
       }
       this.extensionsBound = true;
       this.applyForcedEmptySystemPrompt();
-      console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
+      console.log(`[pihub-server] session_start dispatched to extensions for session ${this.inner.sessionId}`);
     })().catch((err) => {
       this.extensionBindingError = err;
       throw err;
@@ -468,7 +574,7 @@ export class AgentSessionWrapper {
         listener(event);
       } catch (error) {
         console.error(
-          `[pi-web] failed to deliver ${event.type} event:`,
+          `[pihub-server] failed to deliver ${event.type} event:`,
           error instanceof Error ? error.message : error,
         );
       }
@@ -495,7 +601,7 @@ export class AgentSessionWrapper {
         return;
       }
       void this.shutdown().catch((error) => {
-        console.error("[pi-web] failed to shut down idle session:", error instanceof Error ? error.message : error);
+        console.error("[pihub-server] failed to shut down idle session:", error instanceof Error ? error.message : error);
       });
     }, 10 * 60 * 1000);
   }
@@ -625,7 +731,7 @@ export class AgentSessionWrapper {
             }
           }).catch((error) => {
             console.error(
-              "[pi-web] prompt completion handler failed:",
+              "[pihub-server] prompt completion handler failed:",
               error instanceof Error ? error.message : error,
             );
           });
@@ -851,6 +957,7 @@ export class AgentSessionWrapper {
         await this.waitForExtensionsBound();
         this.extensionStatuses.clear();
         this.resetExtensionWidgetsForReload();
+        this.clearAskFlowsForReload();
         this.syncProjectTrust();
         await this.inner.reload();
         if (typeof this.inner.bindExtensions !== "function") {
@@ -926,6 +1033,12 @@ export class AgentSessionWrapper {
     this.idleTimer = null;
     if (this.inner.isBashRunning) this.inner.abortBash();
     this.unsubscribe?.();
+    for (const unsubscribe of this.extensionEventUnsubscribes) {
+      try { unsubscribe(); } catch { /* ignore bus unsubscribe errors */ }
+    }
+    this.extensionEventUnsubscribes = [];
+    this.pendingAskFlows.clear();
+    this.askFlowRequestIds.clear();
     for (const pending of this.pendingUiResponses.values()) pending.cancel();
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
@@ -963,7 +1076,7 @@ export class AgentSessionWrapper {
           });
         } catch (error) {
           console.error(
-            "[pi-web] extension binding failed before session shutdown:",
+            "[pihub-server] extension binding failed before session shutdown:",
             error instanceof Error ? error.message : error,
           );
         }
@@ -985,9 +1098,102 @@ export class AgentSessionWrapper {
   }
 
   private resolveExtensionUiResponse(response: ExtensionUiResponse): void {
+    const pendingAsk = this.pendingAskFlows.get(response.id);
+    if (pendingAsk) {
+      this.extensionEvents?.emit(PI_ASK_SUBMIT_EVENT, {
+        version: 1,
+        flowId: pendingAsk.flowId,
+        requestId: randomUUID(),
+        response: sanitizeAskFlowResponse((response as { ask?: unknown }).ask),
+      });
+      return;
+    }
     const pending = this.pendingUiResponses.get(response.id);
     if (!pending) return;
     pending.resolve(response);
+  }
+
+  private attachExtensionAskBridge(bus: EventBus): void {
+    this.extensionEventUnsubscribes.push(
+      bus.on(PI_ASK_STARTED_EVENT, (data) => this.handleAskStarted(data)),
+      bus.on(PI_ASK_COMPLETED_EVENT, (data) => this.handleAskCompleted(data)),
+      bus.on(PI_ASK_SUBMIT_RESULT_EVENT, (data) => this.handleAskSubmitResult(data)),
+    );
+  }
+
+  private handleAskStarted(data: unknown): void {
+    const payload = normalizeAskStartedEvent(data);
+    if (!payload || !this.isAlive()) return;
+    if (this.askFlowRequestIds.has(payload.flowId)) return;
+    // pi-ask starts the remote flow synchronously inside its custom-UI factory,
+    // so this fires before the matching ctx.ui.custom mount is registered.
+    // That character frame is superseded by the native ask panel — suppress it.
+    this.suppressNextCustomUi += 1;
+    const id = randomUUID();
+    this.pendingAskFlows.set(id, payload);
+    this.askFlowRequestIds.set(payload.flowId, id);
+    const request = {
+      type: "extension_ui_request",
+      id,
+      method: "ask",
+      ask: payload,
+    } as ExtensionUiRequest as AgentEvent;
+    this.pendingUiRequests.set(id, request);
+    this.emit(request);
+  }
+
+  private handleAskCompleted(data: unknown): void {
+    const flowId = askEventFlowId(data);
+    if (!flowId) return;
+    const id = this.askFlowRequestIds.get(flowId);
+    this.askFlowRequestIds.delete(flowId);
+    if (!id) return;
+    this.pendingAskFlows.delete(id);
+    this.pendingUiRequests.delete(id);
+    this.emit({
+      type: "extension_ui_request",
+      id,
+      method: "ask",
+      ask: { flowId },
+      closed: true,
+    } as ExtensionUiRequest as AgentEvent);
+  }
+
+  private handleAskSubmitResult(data: unknown): void {
+    if (!data || typeof data !== "object") return;
+    const result = data as { ok?: unknown; flowId?: unknown; message?: unknown };
+    if (result.ok !== false) return;
+    const flowId = askEventFlowId(data);
+    const id = flowId ? this.askFlowRequestIds.get(flowId) : undefined;
+    const payload = id ? this.pendingAskFlows.get(id) : undefined;
+    if (!id || !payload) return;
+    // The submit was rejected (e.g. validation); reopen the panel with the reason.
+    const request = {
+      type: "extension_ui_request",
+      id,
+      method: "ask",
+      ask: payload,
+      error: typeof result.message === "string" ? result.message : "提交被拒绝",
+    } as ExtensionUiRequest as AgentEvent;
+    this.pendingUiRequests.set(id, request);
+    this.emit(request);
+  }
+
+  /** A reload drops pi-ask's in-memory flows without completed events. */
+  private clearAskFlowsForReload(): void {
+    this.suppressNextCustomUi = 0;
+    for (const [id, flow] of this.pendingAskFlows) {
+      this.pendingUiRequests.delete(id);
+      this.emit({
+        type: "extension_ui_request",
+        id,
+        method: "ask",
+        ask: { flowId: flow.flowId },
+        closed: true,
+      } as ExtensionUiRequest as AgentEvent);
+    }
+    this.pendingAskFlows.clear();
+    this.askFlowRequestIds.clear();
   }
 
   private getExtensionStatuses(): Array<{ key: string; text: string }> {
@@ -1205,6 +1411,7 @@ export class AgentSessionWrapper {
   }
 
   private emitCustomUiRender(id: string, custom: ActiveCustomUi): void {
+    if (custom.suppressed) return;
     let lines: string[];
     try {
       lines = custom.component.render(custom.width);
@@ -1232,13 +1439,15 @@ export class AgentSessionWrapper {
     } catch {
       // Ignore dispose errors from extension UI components.
     }
-    this.emit({
-      type: "extension_ui_request",
-      id,
-      method: "custom",
-      lines: [],
-      closed: true,
-    } as ExtensionUiRequest as AgentEvent);
+    if (!custom.suppressed) {
+      this.emit({
+        type: "extension_ui_request",
+        id,
+        method: "custom",
+        lines: [],
+        closed: true,
+      } as ExtensionUiRequest as AgentEvent);
+    }
     custom.resolve(value);
   }
 
@@ -1305,11 +1514,18 @@ export class AgentSessionWrapper {
             finish(undefined as T);
             return;
           }
+          // pi-ask emits its remote `started` event from a microtask queued
+          // inside the custom-UI factory, so it always lands before this
+          // continuation: an active ask flow marks this mount as the
+          // character frame that the native ask panel supersedes.
+          const suppressed = this.suppressNextCustomUi > 0;
+          if (suppressed) this.suppressNextCustomUi -= 1;
           const custom: ActiveCustomUi = {
             component: component as CustomUiComponent,
             width,
             resolve: (value) => finish(value as T),
             settled: false,
+            suppressed,
           };
           this.activeCustomUis.set(id, custom);
           this.emitCustomUiRender(id, custom);
@@ -1492,7 +1708,7 @@ export class AgentSessionWrapper {
       get theme() { return PLAIN_TEXT_THEME; },
       getAllThemes: () => [],
       getTheme: () => undefined,
-      setTheme: () => ({ success: false, error: "Theme switching is not supported in Pi Web extension UI yet" }),
+      setTheme: () => ({ success: false, error: "Theme switching is not supported in PiHub extension UI yet" }),
       getToolsExpanded: () => false,
       setToolsExpanded: () => {},
     };
@@ -1758,6 +1974,51 @@ export async function startRpcSession(
   cwd: string | undefined,
   options: RpcSessionStartOptions,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  // Process-isolated mode: one child process per session. Required for
+  // @cortexkit/pi-magic-context, whose process-level latch and module-level
+  // state (SQLite handle, ctxReduceRegisteredGlobally, dreamer registry) make
+  // a second in-process session skip extension registration entirely.
+  if (isSessionProcessIsolationEnabled()) {
+    const { startWorkerRpcSession } = await import("./pi-session-host");
+    const result = await startWorkerRpcSession(sessionId, sessionFile, cwd, options);
+    return result as unknown as { session: AgentSessionWrapper; realSessionId: string };
+  }
+
+  return startRpcSessionInProcess(sessionId, sessionFile, cwd, options);
+}
+
+/**
+ * True when each session must run in its own child process.
+ *
+ * Process isolation is the default: @cortexkit/pi-magic-context guards itself
+ * with a process-level latch, so a second in-process session skips extension
+ * registration entirely (verified on dgn-01 2026-08-22: in-process control run
+ * logged "in-process re-init detected" and hung; worker mode loads both
+ * sessions cleanly). Set PIHUB_SESSION_WORKER=0 to force the legacy
+ * in-process path.
+ */
+export function isSessionProcessIsolationEnabled(): boolean {
+  if (process.env.PIHUB_SESSION_WORKER === "0") return false;
+  if (process.env.PIHUB_LEGACY_MODE === "1") return false;
+  // Never fork from inside a worker; that would recurse.
+  if (process.env.PIHUB_IS_SESSION_WORKER === "1") return false;
+  return true;
+}
+
+/**
+ * Create an AgentSession in the current process.
+ *
+ * This is the original in-process path. The session worker calls it directly so
+ * a forked child builds a real AgentSession without re-entering dispatch.
+ */
+export async function startRpcSessionInProcess(
+  sessionId: string,
+  sessionFile: string,
+  cwd: string | undefined,
+  options: RpcSessionStartOptions,
+): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  // Fire-and-forget extensions init (first session only; errors are logged, not fatal)
+  void ensureExtensionsInitialized(getAgentDir());
   const {
     ownerId,
     signal,
@@ -1820,7 +2081,7 @@ export async function startRpcSession(
       // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
       // set allowedToolNames to coding builtins only, which filtered every
       // extension/package-provided tool (e.g. subagents, web access) out of the
-      // tool registry — so they were unavailable in Pi Web sessions even though the
+      // tool registry — so they were unavailable in PiHub sessions even though the
       // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
       // tools (and activate extension tools); we narrow the ACTIVE set below.
       toolsOption = toolNames.length === 0 ? [] : undefined;
@@ -1832,11 +2093,16 @@ export async function startRpcSession(
     // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
     const trustReloadOptions = projectTrustReloadOptions(sessionCwd, agentDir);
     const settingsManager = SettingsManager.create(sessionCwd, agentDir);
+    // Shared extension event bus for this session. Injecting it makes the bus
+    // reachable here (the SDK otherwise keeps it private on the resource
+    // loader), which the pi-ask bridge uses to exchange structured events.
+    const extensionEvents = createEventBus();
     const services = await createSafeAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
       settingsManager,
       resourceLoaderOptions: {
+        eventBus: extensionEvents,
         extensionFactories: [
           createNewApiProviderExtension(),
           createProjectCommandBashExtension({
@@ -1893,7 +2159,7 @@ export async function startRpcSession(
 
       // If specific tool names were requested (non-empty), set the active tools to the
       // requested builtin coding tools PLUS all extension/package tools, so installed
-      // extensions stay usable in Pi Web just like in the `pi` CLI.
+      // extensions stay usable in PiHub just like in the `pi` CLI.
       if (toolNames && toolNames.length > 0) {
         inner.setActiveToolsByName(withExtensionTools(inner, toolNames));
       }
@@ -1918,6 +2184,7 @@ export async function startRpcSession(
         ownerId,
         initialState: "starting",
         startupTimeoutMs,
+        extensionEvents,
       });
       // When all tools are disabled, clear the system prompt entirely.
       // pi's buildSystemPrompt always produces a non-empty prompt even with no tools;
@@ -1947,7 +2214,7 @@ export async function startRpcSession(
         else inner.dispose();
       } catch (cleanupError) {
         console.error(
-          "[pi-web] failed to dispose an incomplete RPC session:",
+          "[pihub-server] failed to dispose an incomplete RPC session:",
           cleanupError instanceof Error ? cleanupError.message : cleanupError,
         );
       }
@@ -1956,7 +2223,7 @@ export async function startRpcSession(
           await removeSessionOwner(startupOwnershipId, ownerId);
         } catch (cleanupError) {
           console.error(
-            "[pi-web] failed to roll back incomplete session ownership:",
+            "[pihub-server] failed to roll back incomplete session ownership:",
             cleanupError instanceof Error ? cleanupError.message : cleanupError,
           );
         }

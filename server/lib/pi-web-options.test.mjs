@@ -17,16 +17,25 @@ test("supports the no-open CLI option", () => {
   assert.equal(parseLaunchOptions(["--no-open"], {}).openBrowser, false);
 });
 
-test("supports truthy PI_WEB_NO_OPEN values", () => {
+test("supports truthy PIHUB_SERVER_NO_OPEN values", () => {
   for (const value of ["1", "true", "TRUE", "yes", "on"]) {
-    assert.equal(parseLaunchOptions([], { PI_WEB_NO_OPEN: value }).openBrowser, false);
+    assert.equal(parseLaunchOptions([], { PIHUB_SERVER_NO_OPEN: value }).openBrowser, false);
   }
 });
 
-test("does not disable browser opening for false PI_WEB_NO_OPEN values", () => {
+test("does not disable browser opening for false PIHUB_SERVER_NO_OPEN values", () => {
   for (const value of ["0", "false", "off", ""]) {
-    assert.equal(parseLaunchOptions([], { PI_WEB_NO_OPEN: value }).openBrowser, true);
+    assert.equal(parseLaunchOptions([], { PIHUB_SERVER_NO_OPEN: value }).openBrowser, true);
   }
+});
+
+test("falls back to legacy PI_WEB_NO_OPEN when PIHUB_SERVER_NO_OPEN is unset", () => {
+  assert.equal(parseLaunchOptions([], { PI_WEB_NO_OPEN: "1" }).openBrowser, false);
+  // The preferred variable wins when both are set.
+  assert.equal(
+    parseLaunchOptions([], { PIHUB_SERVER_NO_OPEN: "0", PI_WEB_NO_OPEN: "1" }).openBrowser,
+    true,
+  );
 });
 
 test("preserves port but rejects non-loopback hostname options", () => {
@@ -46,10 +55,19 @@ test("rejects port values that could inject cmd arguments", () => {
   assert.throws(() => parseLaunchOptions(["-p", "0"], {}), /Port must be between 1 and 65535/);
 });
 
-test("rejects PI_WEB_HOSTNAME outside loopback without trusting ambient HOSTNAME", () => {
+test("rejects PIHUB_SERVER_HOSTNAME outside loopback without trusting ambient HOSTNAME", () => {
   assert.equal(
     parseLaunchOptions([], { HOSTNAME: "container-id" }).hostname,
     "127.0.0.1",
   );
+  assert.throws(() => parseLaunchOptions([], { PIHUB_SERVER_HOSTNAME: "0.0.0.0" }), /Tailnet-only/);
+});
+
+test("falls back to legacy PI_WEB_HOSTNAME when PIHUB_SERVER_HOSTNAME is unset", () => {
   assert.throws(() => parseLaunchOptions([], { PI_WEB_HOSTNAME: "0.0.0.0" }), /Tailnet-only/);
+  // The preferred variable wins when both are set.
+  assert.throws(
+    () => parseLaunchOptions([], { PIHUB_SERVER_HOSTNAME: "0.0.0.0", PI_WEB_HOSTNAME: "127.0.0.1" }),
+    /Tailnet-only/,
+  );
 });

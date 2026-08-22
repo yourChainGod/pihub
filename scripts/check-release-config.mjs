@@ -66,7 +66,8 @@ const updaterPublicKey = read("src-tauri/updater.pubkey").trim();
 
 const appVersion = appPackage.version;
 const serverVersion = serverPackage.version;
-const piAgentVersion = serverPackage.dependencies?.["@earendil-works/pi-coding-agent"];
+const piAgentVersion = serverPackage.dependencies?.["@earendil-works/pi-coding-agent"]
+  ?? serverPackage.peerDependencies?.["@earendil-works/pi-coding-agent"]?.replace(/^>=/, "");
 const errors = [];
 
 expectVersionReset();

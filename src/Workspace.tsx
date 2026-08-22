@@ -6,7 +6,7 @@ import {
   Send, Settings2, ShieldAlert, Sparkles, Square, Sun, TerminalSquare, Trash2, Upload, Volume2, VolumeX, Wifi, Wrench, X,
 } from "lucide-react";
 import { autoNameRemoteSession, browseRemoteDirectories, compactRemoteSession, createRemoteFolderSession, createRemoteSession, createRemoteWorktree, deleteRemoteNewApiProvider, deleteRemoteSession, deleteRemoteWorktree, downloadRemoteFile, exportRemoteSession, forkRemoteSession, isTauriEnvironment, listDevices, loadRemoteAbsoluteFile, loadRemoteAgentState, loadRemoteDirectory, loadRemoteFile, loadRemoteFileMatches, loadRemoteFiles, loadRemoteGit, loadRemoteGitDiff, loadRemoteModels, loadRemoteModelsConfig, loadRemoteNewApi, loadRemoteRunning, loadRemoteSession, loadRemoteSessions, loadRemoteThinking, loadRemoteWorktrees, navigateRemoteTree, notifyDone, refreshRemoteNewApiProvider, remoteAgentEventMatchesDevice, remoteAgentStreamKey, remoteFileAction, renameRemoteSession, saveRemoteModelsConfig, saveRemoteNewApiProvider, sendRemoteAgentCommand, sendRemotePrompt, startRemoteAgentStream, steerRemotePrompt, stopRemoteAgent, stopRemoteAgentStream, uploadRemoteCheck, uploadRemoteFiles } from "./lib";
-import type { AttachedImage, Device, RemoteAgentEventPayload, RemoteAgentState, RemoteContextUsage, RemoteDirectoryBrowse, RemoteDirectoryListing, RemoteFilePreview, RemoteGitDiff, RemoteGitStatus, RemoteModelsResponse, RemoteNewApiConfig, RemoteSession, RemoteUiRequest, RemoteWidgetItem, RemoteWorktree, RemoteWorktrees, SessionDetail, SessionMessage, SessionTokenStats, SessionTreeNode } from "./types";
+import type { AttachedImage, Device, RemoteAgentEventPayload, RemoteAgentState, RemoteAskResponse, RemoteContextUsage, RemoteDirectoryBrowse, RemoteDirectoryListing, RemoteFilePreview, RemoteGitDiff, RemoteGitStatus, RemoteModelsResponse, RemoteNewApiConfig, RemoteSession, RemoteUiRequest, RemoteWidgetItem, RemoteWorktree, RemoteWorktrees, SessionDetail, SessionMessage, SessionTokenStats, SessionTreeNode } from "./types";
 import { isDesktopWindowFullscreen, listenDesktopEvent, onDesktopWindowResized, startDesktopWindowDragging } from "./desktopTransport";
 import { cacheKey, deleteCachedSession, peekSession, readCachedSession, writeCachedSession } from "./sessionCache";
 import { peekResource, readCachedResource, writeCachedResource } from "./resourceCache";
@@ -16,6 +16,7 @@ import { ConfirmDialog, NamePromptDialog, useDialogFocus } from "./dialogs";
 import RemoteTerminal from "./RemoteTerminal";
 import DeviceSetup from "./DeviceSetup";
 import ResourceManager from "./ResourceManager";
+import { AskFlowPanel, PermissionPill, SubagentPanel, TodoRail } from "./ExtensionPanels";
 
 type CoreToolTab = "files" | "git" | "terminal";
 type ToolTab = CoreToolTab | "resources";
@@ -113,6 +114,8 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   const historyWalkRef = useRef<{ sessionId: string; index: number } | null>(null);
   const [toolPreset, setToolPreset] = useState<string>("default");
   const [askQueue, setAskQueue] = useState<Array<{ sessionId: string; request: RemoteUiRequest }>>([]);
+  // pi-ask native ask panels (structured flow bridge): keyed by UI request id.
+  const [askFlows, setAskFlows] = useState<Map<string, { sessionId: string; ask: NonNullable<RemoteUiRequest["ask"]>; error?: string }>>(new Map());
   // Extension custom UIs (e.g. pi-ask's selector): keyed by UI request id.
   const [customUis, setCustomUis] = useState<Map<string, { sessionId: string; lines: string[] }>>(new Map());
   // Extension widgets (e.g. pi-todo-rail's todo bar): per-session, keyed by widgetKey.
@@ -141,6 +144,14 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   const hydratedSessionsRef = useRef(new Set<string>());
   const selected = sessions.find((session) => session.id === selectedId);
   const isRunning = selectedId ? running.has(selectedId) : false;
+  // pi-todo-rail writes its snapshot into the transcript during a turn, so the
+  // list is re-read whenever a turn finishes.
+  const [todoRefreshKey, setTodoRefreshKey] = useState(0);
+  const wasRunningRef = useRef(false);
+  useEffect(() => {
+    if (wasRunningRef.current && !isRunning) setTodoRefreshKey((value) => value + 1);
+    wasRunningRef.current = isRunning;
+  }, [isRunning]);
 
   const updateDraft = useCallback((next: string): void => {
     draftRef.current = next;
@@ -636,6 +647,17 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
           return;
         }
         // setTitle is intentionally ignored: the desktop window owns its title.
+        if (request.method === "ask" && request.ask) {
+          // pi-ask native ask panel: structured flow bridged from the
+          // extension event bus; the character custom UI stays suppressed.
+          setAskFlows((current) => {
+            const next = new Map(current);
+            if (request.closed) next.delete(request.id);
+            else next.set(request.id, { sessionId, ask: request.ask!, error: request.error });
+            return next;
+          });
+          return;
+        }
         if (request.method === "custom") {
           // Headless custom UI frame (e.g. pi-ask): replace lines, drop on close.
           setCustomUis((current) => {
@@ -648,6 +670,11 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
         }
         if (["select", "confirm", "input", "editor"].includes(request.method)) {
           setAskQueue((queue) => [...queue, { sessionId, request }]);
+          // 发送系统通知并激活窗口
+          if (isTauriEnvironment()) {
+            void notifyDone("权限请求", request.title || "需要您的确认").catch(() => undefined);
+            void import("@tauri-apps/plugin-app").then((app) => app.show()).catch(() => undefined);
+          }
         }
       },
     };
@@ -743,6 +770,12 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   const stats = useMemo<SessionTokenStats | null>(() => computeSessionStats(detail?.context.messages ?? []), [detail]);
   const aboveWidgets = useMemo(() => [...widgets.values()].filter((item) => (item.placement ?? "aboveEditor") === "aboveEditor"), [widgets]);
   const belowWidgets = useMemo(() => [...widgets.values()].filter((item) => item.placement === "belowEditor"), [widgets]);
+  const activeAskFlow = useMemo(() => {
+    for (const [id, entry] of askFlows) {
+      if (entry.sessionId === selectedId) return { id, ...entry };
+    }
+    return null;
+  }, [askFlows, selectedId]);
   const contextUsage: RemoteContextUsage | null = agentState?.contextUsage ?? null;
   const isCompacting = Boolean(agentState?.isCompacting) || compactBusy;
   const branches = useMemo(() => collectBranches(detail?.tree ?? [], detail?.leafId ?? null), [detail]);
@@ -850,6 +883,31 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
 
   useEffect(() => { setSlashCommands(null); setToolPreset("default"); }, [selectedId]);
 
+  // 后台预取历史消息：当空闲时，自动拉取当前会话未缓存的历史消息
+  useEffect(() => {
+    if (!device || !selectedId || !detail || isRunning) return;
+    // 如果已经加载了全部消息，不需要预取
+    if (!detail.context.truncated) return;
+
+    const timer = setTimeout(async () => {
+      try {
+        const key = cacheKey(device.id, selectedId);
+        const cached = await peekSession(key);
+        // 如果缓存中的消息数量少于服务端总数，后台拉取
+        const totalMessages = detail.context.totalMessages ?? 0;
+        if (!cached || (cached.context?.messages?.length ?? 0) < totalMessages) {
+          const fullDetail = await loadRemoteSession(device, selectedId, totalMessages);
+          await writeCachedSession(key, fullDetail);
+          console.debug(`[预取] 已缓存会话 ${selectedId} 的 ${fullDetail.context.messages.length} 条消息`);
+        }
+      } catch (error) {
+        console.debug(`[预取] 会话 ${selectedId} 预取失败:`, error);
+      }
+    }, 3000); // 空闲 3 秒后开始预取
+
+    return () => clearTimeout(timer);
+  }, [device, selectedId, detail, isRunning]);
+
   function applySlash(item: { name: string }) {
     updateDraft(`/${item.name} `);
     setSlashDismissed(false);
@@ -925,6 +983,18 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     if (!current || !device) return;
     try {
       await sendRemoteAgentCommand(device, current.sessionId, { type: "extension_ui_response", id: current.request.id, ...response });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  }
+
+  async function respondAskFlow(id: string, sessionId: string, response: RemoteAskResponse) {
+    setAskFlows((current) => {
+      const next = new Map(current);
+      next.delete(id);
+      return next;
+    });
+    if (!device) return;
+    try {
+      await sendRemoteAgentCommand(device, sessionId, { type: "extension_ui_response", id, ask: response });
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   }
 
@@ -1346,6 +1416,9 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
         {compactResult && <div className="compact-result"><Scissors size={12} /><span>上下文已压缩：{formatCompact(compactResult.before)} → {formatCompact(compactResult.after)} tokens（节省 {formatCompact(Math.max(0, compactResult.before - compactResult.after))}）</span><button onClick={() => setCompactResult(null)} aria-label="关闭"><X size={12} /></button></div>}
         {images.length > 0 && <div className="image-attachments">{images.map((image, index) => <span key={index} className="image-attachment"><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.name} /><button onClick={() => setImages((current) => current.filter((_, i) => i !== index))} aria-label="移除图片"><X size={11} /></button></span>)}</div>}
         <ExtensionWidgets items={aboveWidgets} />
+        <SubagentPanel device={device} sessionId={selectedId} />
+        <TodoRail device={device} sessionId={selectedId} refreshKey={todoRefreshKey} />
+        {activeAskFlow && <AskFlowPanel flow={activeAskFlow.ask} error={activeAskFlow.error} onRespond={(response) => void respondAskFlow(activeAskFlow.id, activeAskFlow.sessionId, response)} />}
         {[...customUis.entries()].filter(([, entry]) => entry.sessionId === selectedId).map(([id, entry]) => (
           <CustomUiCard key={id} id={id} lines={entry.lines} onKey={(data) => { if (device && selectedId) void sendRemoteAgentCommand(device, selectedId, { type: "extension_ui_input", id, data }); }} />
         ))}
@@ -1404,7 +1477,7 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
             {group.items.map(({ item, index }) => <button role="option" aria-selected={index === slashIndex} key={`${item.source ?? "builtin"}-${item.name}`} className={index === slashIndex ? "active" : ""} data-slash-active={index === slashIndex ? "" : undefined} onMouseDown={(event) => { event.preventDefault(); applySlash(item); }}><span>/{item.name}</span><small>{item.description || ""}</small></button>)}
           </div>)}</div>}
           {mentionOpen && <div className="composer-menu mention-menu">{mentionItems.map((path, index) => <button key={path} className={index === mentionIndex ? "active" : ""} onMouseDown={(event) => { event.preventDefault(); applyMention(path); }}><span>@{path}</span><small>文件引用</small></button>)}</div>}
-          <div className="composer-toolbar"><div className="composer-selects popover-root" ref={composerSelectRef}><button className="model-pill" aria-label="选择模型" aria-expanded={modelMenu === "model"} onClick={() => setModelMenu(modelMenu === "model" ? null : "model")}><Bot size={14} />{detail?.context.model?.modelId || "默认模型"}<ChevronDown size={11} /></button><button className="thinking-pill" aria-label="选择思考强度" aria-expanded={modelMenu === "thinking"} onClick={() => setModelMenu(modelMenu === "thinking" ? null : "thinking")}>{thinkingLabel(detail?.context.thinkingLevel)}<ChevronDown size={11} /></button><button className="thinking-pill" title="工具预设" aria-label="选择工具预设" aria-expanded={modelMenu === "tools"} onClick={() => setModelMenu(modelMenu === "tools" ? null : "tools")}><Wrench size={11} />{TOOL_PRESETS.find((item) => item.id === toolPreset)?.label ?? "默认"}<ChevronDown size={11} /></button>{modelMenu === "tools" && <div className="composer-menu thinking-menu tools-menu">{TOOL_PRESETS.map((preset) => <button key={preset.id} className={toolPreset === preset.id ? "active" : ""} onClick={() => void changeToolPreset(preset.id)}>{preset.label}<small>{preset.tools.length ? preset.tools.join(" ") : "停用全部工具"}</small></button>)}</div>}{modelMenu === "model" && <div className="composer-menu model-menu">{models?.modelList.map((item) => <button key={`${item.provider}/${item.id}`} className={detail?.context.model?.provider === item.provider && detail.context.model.modelId === item.id ? "active" : ""} onClick={() => void changeModel(item.provider, item.id)}><span>{item.name || item.id}</span><small>{item.provider}/{item.id}</small></button>)}<button className="manage-models" onClick={() => { setModelMenu(null); setModelsConfigOpen(true); }}><Settings2 size={13} />管理模型配置…</button></div>}{modelMenu === "thinking" && <div className="composer-menu thinking-menu">{thinkingOptions(models, detail).map((level) => <button key={level} className={detail?.context.thinkingLevel === level ? "active" : ""} onClick={() => void changeThinking(level)}>{thinkingLabel(level)}</button>)}</div>}</div><div className="composer-actions"><input ref={filePickRef} type="file" accept="image/*" multiple hidden onChange={(event) => { void pickImages(event.target.files); event.currentTarget.value = ""; }} /><button className="composer-tool" title="添加图片" aria-label="添加图片" onClick={() => filePickRef.current?.click()} disabled={!selectedId}><ImagePlus size={14} /></button><button className="composer-tool" title={isCompacting ? "正在压缩上下文…" : "压缩上下文（Compact）"} aria-label="压缩上下文" onClick={() => void compactSession()} disabled={!selectedId || isCompacting}>{compactBusy ? <LoaderCircle className="spin" size={14} /> : <Scissors size={14} />}</button><button className="composer-tool" title={soundOn ? "关闭完成提示音" : "开启完成提示音"} aria-label="提示音开关" onClick={() => { const next = !soundOn; setSoundOn(next); localStorage.setItem("pihub-sound", next ? "1" : "0"); }}>{soundOn ? <Volume2 size={14} /> : <VolumeX size={14} />}</button></div>{isRunning ? <button className="stop-button" aria-label="停止运行" onClick={async () => { if (!device || !selectedId) return; try { await stopRemoteAgent(device, selectedId); setRunning((current) => { const next = new Set(current); next.delete(selectedId); return next; }); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } }}><Square size={12} fill="currentColor" /></button> : null}<button className="send-button" aria-label={isRunning ? "插话" : "发送消息"} title={isRunning ? "插话：打断当前生成" : "发送"} onClick={() => void submit()} disabled={(!draft.trim() && !images.length) || sending || !selectedId}>{sending ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}</button></div>
+          <div className="composer-toolbar"><div className="composer-selects popover-root" ref={composerSelectRef}><button className="model-pill" aria-label="选择模型" aria-expanded={modelMenu === "model"} onClick={() => setModelMenu(modelMenu === "model" ? null : "model")}><Bot size={14} />{detail?.context.model?.modelId || "默认模型"}<ChevronDown size={11} /></button><button className="thinking-pill" aria-label="选择思考强度" aria-expanded={modelMenu === "thinking"} onClick={() => setModelMenu(modelMenu === "thinking" ? null : "thinking")}>{thinkingLabel(detail?.context.thinkingLevel)}<ChevronDown size={11} /></button><button className="thinking-pill" title="工具预设" aria-label="选择工具预设" aria-expanded={modelMenu === "tools"} onClick={() => setModelMenu(modelMenu === "tools" ? null : "tools")}><Wrench size={11} />{TOOL_PRESETS.find((item) => item.id === toolPreset)?.label ?? "默认"}<ChevronDown size={11} /></button><PermissionPill device={device} />{modelMenu === "tools" && <div className="composer-menu thinking-menu tools-menu">{TOOL_PRESETS.map((preset) => <button key={preset.id} className={toolPreset === preset.id ? "active" : ""} onClick={() => void changeToolPreset(preset.id)}>{preset.label}<small>{preset.tools.length ? preset.tools.join(" ") : "停用全部工具"}</small></button>)}</div>}{modelMenu === "model" && <div className="composer-menu model-menu">{models?.modelList.map((item) => <button key={`${item.provider}/${item.id}`} className={detail?.context.model?.provider === item.provider && detail.context.model.modelId === item.id ? "active" : ""} onClick={() => void changeModel(item.provider, item.id)}><span>{item.name || item.id}</span><small>{item.provider}/{item.id}</small></button>)}<button className="manage-models" onClick={() => { setModelMenu(null); setModelsConfigOpen(true); }}><Settings2 size={13} />管理模型配置…</button></div>}{modelMenu === "thinking" && <div className="composer-menu thinking-menu">{thinkingOptions(models, detail).map((level) => <button key={level} className={detail?.context.thinkingLevel === level ? "active" : ""} onClick={() => void changeThinking(level)}>{thinkingLabel(level)}</button>)}</div>}</div><div className="composer-actions"><input ref={filePickRef} type="file" accept="image/*" multiple hidden onChange={(event) => { void pickImages(event.target.files); event.currentTarget.value = ""; }} /><button className="composer-tool" title="添加图片" aria-label="添加图片" onClick={() => filePickRef.current?.click()} disabled={!selectedId}><ImagePlus size={14} /></button><button className="composer-tool" title={isCompacting ? "正在压缩上下文…" : "压缩上下文（Compact）"} aria-label="压缩上下文" onClick={() => void compactSession()} disabled={!selectedId || isCompacting}>{compactBusy ? <LoaderCircle className="spin" size={14} /> : <Scissors size={14} />}</button><button className="composer-tool" title={soundOn ? "关闭完成提示音" : "开启完成提示音"} aria-label="提示音开关" onClick={() => { const next = !soundOn; setSoundOn(next); localStorage.setItem("pihub-sound", next ? "1" : "0"); }}>{soundOn ? <Volume2 size={14} /> : <VolumeX size={14} />}</button></div>{isRunning ? <button className="stop-button" aria-label="停止运行" onClick={async () => { if (!device || !selectedId) return; try { await stopRemoteAgent(device, selectedId); setRunning((current) => { const next = new Set(current); next.delete(selectedId); return next; }); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } }}><Square size={12} fill="currentColor" /></button> : null}<button className="send-button" aria-label={isRunning ? "插话" : "发送消息"} title={isRunning ? "插话：打断当前生成" : "发送"} onClick={() => void submit()} disabled={(!draft.trim() && !images.length) || sending || !selectedId}>{sending ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}</button></div>
         </div>
         <ExtensionWidgets items={belowWidgets} />
         <small>{isRunning ? "Enter 插话打断当前生成 · Esc 中断运行" : "Enter 发送 · Shift+Enter 换行 · ↑ 历史输入 · Esc 中断运行"}</small>
@@ -2122,6 +2195,16 @@ function SessionStats({ stats, contextUsage, detail, selected, open, onToggle }:
   const ctxClass = percent !== null && percent > 90 ? "ctx-danger" : percent !== null && percent > 70 ? "ctx-warn" : "";
   const cacheHit = tokens && tokens.input + tokens.cacheRead > 0 ? (tokens.cacheRead / (tokens.input + tokens.cacheRead)) * 100 : null;
   const copyValue = (label: string, value: string) => { void navigator.clipboard.writeText(value).then(() => { setCopied(label); window.setTimeout(() => setCopied(""), 1400); }); };
+
+  // Token distribution
+  const totalTokens = tokens ? tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite : 0;
+  const tokenDist = tokens ? [
+    { label: "输入", value: tokens.input, color: "#3b82f6" },
+    { label: "输出", value: tokens.output, color: "#10b981" },
+    { label: "缓存读", value: tokens.cacheRead, color: "#8b5cf6" },
+    { label: "缓存写", value: tokens.cacheWrite, color: "#f59e0b" }
+  ].filter(item => item.value > 0) : [];
+
   return <span className="popover-root stats-anchor">
     <button className={`stats-chip ${ctxClass}`} onClick={onToggle} title="会话统计与上下文用量">
       {tokens && <span>↑{formatCompact(tokens.input)} ↓{formatCompact(tokens.output)}</span>}
@@ -2129,17 +2212,72 @@ function SessionStats({ stats, contextUsage, detail, selected, open, onToggle }:
       {contextUsage && <span className="ctx">{percent !== null ? `${percent.toFixed(0)}%` : "—"} / {formatCompact(contextUsage.contextWindow)}</span>}
     </button>
     {open && <div className="stats-popover">
-      <h4>会话信息</h4>
-      <dl>
+      <div className="stats-header">
+        <h4>会话信息</h4>
+        {cost > 0 && <div className="stats-cost">${cost.toFixed(4)}</div>}
+      </div>
+
+      {/* Context usage ring chart */}
+      {contextUsage && percent !== null && <div className="stats-ring-section">
+        <svg className="stats-ring" viewBox="0 0 100 100">
+          <circle cx="50" cy="50" r="40" fill="none" stroke="var(--line)" strokeWidth="8" />
+          <circle cx="50" cy="50" r="40" fill="none" stroke={percent > 90 ? "var(--danger)" : percent > 70 ? "var(--warn)" : "var(--accent)"} strokeWidth="8" strokeDasharray={`${percent * 2.513} 251.3`} strokeLinecap="round" transform="rotate(-90 50 50)" />
+          <text x="50" y="50" textAnchor="middle" dominantBaseline="central" fill="var(--text)" fontSize="20" fontWeight="600">{percent.toFixed(0)}%</text>
+        </svg>
+        <div className="stats-ring-label">
+          <div className="stats-ring-title">上下文用量</div>
+          <div className="stats-ring-detail">{formatCompact(Math.round((contextUsage.contextWindow * percent) / 100))} / {formatCompact(contextUsage.contextWindow)}</div>
+        </div>
+      </div>}
+
+      {/* Token distribution bars */}
+      {tokenDist.length > 0 && <div className="stats-token-section">
+        <div className="stats-section-title">Token 分布</div>
+        <div className="stats-token-bars">
+          {tokenDist.map(item => {
+            const pct = (item.value / totalTokens) * 100;
+            return <div key={item.label} className="stats-token-bar">
+              <div className="stats-token-bar-label">
+                <span className="stats-token-bar-name">{item.label}</span>
+                <span className="stats-token-bar-value">{formatCompact(item.value)}</span>
+              </div>
+              <div className="stats-token-bar-track">
+                <div className="stats-token-bar-fill" style={{ width: `${pct}%`, background: item.color }} />
+              </div>
+            </div>;
+          })}
+        </div>
+        {cacheHit !== null && <div className="stats-cache-hit">
+          <span>缓存命中率</span>
+          <strong>{cacheHit.toFixed(1)}%</strong>
+        </div>}
+      </div>}
+
+      {/* Messages and tools stats */}
+      {stats && <div className="stats-activity-section">
+        <div className="stats-section-title">活动统计</div>
+        <div className="stats-activity-grid">
+          <div className="stats-activity-card">
+            <div className="stats-activity-value">{stats.userMessages}</div>
+            <div className="stats-activity-label">用户消息</div>
+          </div>
+          <div className="stats-activity-card">
+            <div className="stats-activity-value">{stats.assistantMessages}</div>
+            <div className="stats-activity-label">助手回复</div>
+          </div>
+          <div className="stats-activity-card">
+            <div className="stats-activity-value">{stats.toolCalls}</div>
+            <div className="stats-activity-label">工具调用</div>
+          </div>
+        </div>
+      </div>}
+
+      {/* Metadata */}
+      <dl className="stats-metadata">
         {selected?.name && <div><dt>名称</dt><dd>{selected.name}</dd></div>}
         {detail?.filePath && <div><dt>文件</dt><dd className="copyable" onClick={() => copyValue("file", detail.filePath || "")}>{copied === "file" ? "已复制" : detail.filePath}</dd></div>}
         {selected && <div><dt>会话 ID</dt><dd className="copyable" onClick={() => copyValue("id", selected.id)}>{copied === "id" ? "已复制" : selected.id}</dd></div>}
         {detail ? <div><dt>活跃时长</dt><dd>{formatDuration(detail.totalActiveMs)}</dd></div> : null}
-        {stats && <div><dt>消息</dt><dd>用户 {stats.userMessages} 条 · 助手 {stats.assistantMessages} 条 · 工具调用 {stats.toolCalls} 次</dd></div>}
-        {tokens && <div><dt>Tokens</dt><dd>输入 {tokens.input.toLocaleString()} · 输出 {tokens.output.toLocaleString()} · 缓存读取 {tokens.cacheRead.toLocaleString()} · 缓存写入 {tokens.cacheWrite.toLocaleString()}</dd></div>}
-        {cost > 0 && <div><dt>成本</dt><dd>${cost.toFixed(4)}</dd></div>}
-        {contextUsage && <div><dt>上下文</dt><dd className={ctxClass}>{percent !== null ? `已用 ${percent.toFixed(1)}%` : "用量未知"}（窗口共 {contextUsage.contextWindow.toLocaleString()} tokens）</dd></div>}
-        {cacheHit !== null && <div><dt>缓存命中率</dt><dd>{cacheHit.toFixed(1)}%</dd></div>}
       </dl>
     </div>}
   </span>;
@@ -2393,7 +2531,7 @@ function AskCard({ entry, sessionName, onRespond }: {
     {request.method === "editor" && <textarea className="ask-editor" autoFocus value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} />}
     <div className="ask-inline-foot">
       {request.method === "editor" && <span className="ask-hint">{isMac ? "⌘" : "Ctrl+"}Enter 提交</span>}
-      {request.method === "select" && <span className="ask-hint">↑↓ 选择 · Enter 确认 · Esc 取消</span>}
+      {request.method === "select" && <span className="ask-hint">点击或按 ↑↓ 选择 · Enter 确认 · Esc 取消</span>}
       <button className="ask-cancel" onClick={() => onRespond({ cancelled: true })}>取消</button>
       {request.method === "confirm"
         ? <button className="ask-confirm" autoFocus onClick={() => onRespond({ confirmed: true })}>确认</button>

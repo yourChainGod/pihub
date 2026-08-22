@@ -498,13 +498,13 @@ export async function smokeServerResource(options = {}) {
     const origin = "http://127.0.0.1:" + port;
     child = spawn(
       process.execPath,
-      [path.join(packageRoot, "bin", "pi-web.js"), "--no-open", "--port", String(port)],
+      [path.join(packageRoot, "bin", "pihub-server.js"), "--no-open", "--port", String(port)],
       {
         cwd: packageRoot,
         env: relocatedRuntimeEnvironment(home, {
           PIHUB_AUTH_STATE_PATH: authState,
           PIHUB_HEADLESS: "1",
-          PI_WEB_NO_OPEN: "1",
+          PIHUB_SERVER_NO_OPEN: "1",
         }),
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,

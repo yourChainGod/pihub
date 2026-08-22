@@ -45,11 +45,14 @@ const WINDOWS_RUNTIME_KEYS = [
 
 // These values configure PiHub itself. Unknown PIHUB/PI_WEB variables are not
 // admitted, so a future token or credential cannot cross this boundary by
-// sharing a prefix.
+// sharing a prefix. PI_WEB_* entries are legacy fallbacks for the preferred
+// PIHUB_SERVER_* spellings.
 const SERVER_RUNTIME_KEYS = [
   "PI_CODING_AGENT_DIR",
   "PI_WEB_ALLOWED_HOSTS",
   "PI_WEB_PASSWORD",
+  "PIHUB_SERVER_ALLOWED_HOSTS",
+  "PIHUB_SERVER_PASSWORD",
   "PIHUB_AUTH_STATE_PATH",
   "PIHUB_TERMINALS_PER_DEVICE",
   "PIHUB_TERMINALS_PER_PROCESS",
@@ -61,6 +64,7 @@ const SERVER_RUNTIME_KEYS = [
 
 const DERIVED_RUNTIME_KEYS = new Set([
   "PI_WEB_HOSTNAME",
+  "PIHUB_SERVER_HOSTNAME",
   "PIHUB_SERVER_ROOT",
   "PIHUB_SERVER_VERSION",
   "PIHUB_TAILNET_HOSTNAME",

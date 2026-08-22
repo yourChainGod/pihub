@@ -54,6 +54,7 @@ export function isSensitiveEnvironmentName(name: string): boolean {
   return normalized === "PORT"
     || normalized === "NODE_ENV"
     || normalized === "PI_WEB_PASSWORD"
+    || normalized === "PIHUB_SERVER_PASSWORD"
     || normalized.startsWith("NEXT_")
     || normalized.startsWith("PIHUB_AUTH")
     || normalized === "API_KEY"

@@ -75,6 +75,12 @@ function groupMessages(messages: SessionMessage[], entryIds: string[] | undefine
     } else run.forEach((message, offset) => items.push(singleItem(message, runStart + offset, entryIds)));
     run = [];
   };
+  const countBlocks = (messages: SessionMessage[]): number => {
+    return messages.reduce((total, message) => {
+      const blocks = normalizeBlocks(message.content);
+      return total + blocks.filter((b) => b.type === "toolCall" || b.type === "thinking").length;
+    }, 0);
+  };
   messages.forEach((message, index) => {
     // toolResult entries render inside the owning tool call; they are invisible
     // in the flow and must not break a run of activity-only messages.
@@ -82,6 +88,8 @@ function groupMessages(messages: SessionMessage[], entryIds: string[] | undefine
     if (isActivityOnly(message)) {
       if (!run.length) runStart = index;
       run.push(message);
+      // Cap at 14 blocks (7 thinking + 7 toolCall max) to avoid giant cards.
+      if (countBlocks(run) >= 14) flush();
       return;
     }
     flush();
@@ -125,6 +133,7 @@ function messageToolCallIds(message: SessionMessage): string[] {
 function ToolCallGroupInner({ messages, messageEntryIds, toolResults, onLoadThinking }: { messages: SessionMessage[]; messageEntryIds: (string | undefined)[]; toolResults: Map<string, SessionMessage>; onLoadThinking?: (entryId: string, blockIndex: number) => Promise<string> }) {
   const [open, setOpen] = useState(true);
   const modelLabel = messages.map((message) => (message.model || message.provider ? String(message.model ?? message.provider) : "")).find(Boolean) ?? "";
+  const streaming = messages.some((message) => message.pihubStreaming === true);
   // Keep the original block order across the merged messages so the group reads
   // as the chronological think → act → think → … sequence it was.
   const entries = messages.flatMap((message, messageIndex) => normalizeBlocks(message.content).map((block, blockIndex) => ({ block, messageIndex, blockIndex })));
@@ -135,10 +144,15 @@ function ToolCallGroupInner({ messages, messageEntryIds, toolResults, onLoadThin
     callCount ? `${callCount} 个工具调用` : "",
     thinkingCount ? `${thinkingCount} 段思考` : "",
   ].filter(Boolean).join(" · ");
-  return <article className="original-message assistant-message tool-group">
+  const successCount = entries.filter((entry) => typeof entry.block.toolCallId === "string" && toolResults.get(entry.block.toolCallId) && !toolResults.get(entry.block.toolCallId)?.isError).length;
+  return <article className={`original-message assistant-message tool-group ${errorCount > 0 ? "has-error" : ""} ${streaming ? "streaming" : ""}`}>
     <button className="tool-group-head" onClick={() => setOpen(!open)} aria-expanded={open}>
       <Wrench size={12} />
-      <span>{summary}{errorCount ? `（${errorCount} 个失败）` : ""}</span>
+      <span>{summary}</span>
+      {(successCount > 0 || errorCount > 0) && <div className="tool-group-badges">
+        {successCount > 0 && <span className="tool-group-badge ok"><Check size={9} />{successCount}</span>}
+        {errorCount > 0 && <span className="tool-group-badge bad"><X size={9} />{errorCount}</span>}
+      </div>}
       {modelLabel && <small>{modelLabel}</small>}
       <small>{formatTime(messages[messages.length - 1]?.timestamp)}</small>
       {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -191,10 +205,11 @@ function AssistantMessage({ message, toolResults, entryId, onLoadThinking }: { m
   const blocks = normalizeBlocks(message.content);
   const text = blocks.filter((block) => block.type === "text").map((block) => String(block.text ?? "")).join("\n");
   const modelLabel = message.model || message.provider ? String(message.model ?? message.provider) : "";
+  const streaming = message.pihubStreaming === true;
   if (!blocks.length && message.stopReason !== "error") return null;
-  return <article className="original-message assistant-message">
+  return <article className={`original-message assistant-message ${streaming ? "streaming" : ""}`}>
     {modelLabel && <div className="model-label">{modelLabel}</div>}
-    {renderBlocks(blocks, (block, index) => <Block key={index} block={block} streaming={message.pihubStreaming === true} result={typeof block.toolCallId === "string" ? toolResults.get(block.toolCallId) : undefined} loadThinking={entryId && onLoadThinking ? () => onLoadThinking(entryId, index) : undefined} />)}
+    {renderBlocks(blocks, (block, index) => <Block key={index} block={block} streaming={streaming} result={typeof block.toolCallId === "string" ? toolResults.get(block.toolCallId) : undefined} loadThinking={entryId && onLoadThinking ? () => onLoadThinking(entryId, index) : undefined} />)}
     {message.stopReason === "error" && <div className="provider-error"><CircleAlert size={14} />{String(message.errorMessage || "模型返回错误")}</div>}
     <div className="message-meta assistant-meta">
       {text.trim() && <button onClick={() => copy(text, setCopied)}><Copy size={11} />{copied ? "已复制" : "复制"}</button>}
@@ -251,18 +266,140 @@ function ToolCall({ block, result, compact = false }: { block: ContentBlock; res
   const input = toolText(block.input ?? block.rawInput);
   const output = result ? normalizeBlocks(result.content).map((item) => item.type === "text" ? String(item.text ?? "") : "[媒体]").filter(Boolean).join("\n") : "";
   const edit = editToolDiff(name, block.input ?? block.rawInput, result);
+  const parsed = parseToolInput(name, block.input ?? block.rawInput);
   const clippedOutput = clipToolText(output);
   const outputTruncated = clippedOutput !== output;
+
   return <div className={`original-tool-call ${compact ? "compact" : ""} ${result?.isError ? "error" : ""}`}>
     <button onClick={() => setOpen(!open)}>{compact && <i className={`tool-status ${result ? (result.isError ? "failed" : "done") : "pending"}`} aria-hidden="true" />}<ToolIcon name={name} /><strong>{name}</strong><span>{toolSummary(block.input ?? block.rawInput) || preview(input)}</span>{edit && <em className="diff-chips"><i className="add">+{edit.added}</i><i className="del">−{edit.removed}</i></em>}{!compact && result && <i className={`tool-verdict ${result.isError ? "failed" : "done"}`} aria-label={result.isError ? "失败" : "成功"}>{result.isError ? <X size={12} /> : <Check size={12} />}</i>}{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</button>
-    {open && <div className="tool-detail">{edit ? <DiffView diff={edit} /> : input && <><label>输入</label><pre>{clipToolText(input)}</pre></>}{result && (!edit || Boolean(result.isError)) && <><label>{result.isError ? "错误" : "结果"}</label>{clippedOutput ? <><Markdown text={clippedOutput} />{outputTruncated && <div className="tool-output-more">… 内容过长，已截断（共 {output.length} 字符）…</div>}</> : <div className="tool-output-empty">完成</div>}</>}</div>}
+    {open && <div className="tool-detail">{edit ? <DiffView diff={edit} /> : parsed ? <ToolInputView parsed={parsed} /> : input && <><label>输入</label><pre>{clipToolText(input)}</pre></>}{result && (!edit || Boolean(result.isError)) && <><label>{result.isError ? "错误" : "结果"}</label>{clippedOutput ? <><Markdown text={clippedOutput} />{outputTruncated && <div className="tool-output-more">… 内容过长，已截断（共 {output.length} 字符）…</div>}</> : <div className="tool-output-empty">完成</div>}</>}</div>}
   </div>;
 }
 
 interface EditDiffLine { kind: "add" | "del" | "ctx" | "hunk"; text: string }
 interface EditDiffInfo { path: string; added: number; removed: number; lines: EditDiffLine[]; truncated: boolean }
+interface ParsedToolInput { type: "write" | "read" | "bash" | "edit"; data: Record<string, unknown> }
 
 const DIFF_LINE_CAP = 400;
+
+/** Parse tool input for semantic display (Write/Read/Bash/Edit). */
+function parseToolInput(name: string, input: unknown): ParsedToolInput | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const args = input as Record<string, unknown>;
+  const lower = name.toLowerCase();
+
+  // Write tool
+  if (lower === "write" || lower.includes("write")) {
+    const filePath = args.file_path ?? args.filePath ?? args.path;
+    const content = args.content;
+    // Relax validation: allow any truthy content
+    if (filePath && content != null) {
+      const contentStr = String(content);
+      return { type: "write", data: { filePath: String(filePath), contentLength: contentStr.length, preview: contentStr.slice(0, 300) } };
+    }
+  }
+
+  // Read tool
+  if (lower === "read" || lower.includes("read")) {
+    const filePath = args.file_path ?? args.filePath ?? args.path;
+    if (filePath) {
+      return { type: "read", data: { filePath: String(filePath), offset: args.offset, limit: args.limit } };
+    }
+  }
+
+  // Bash tool
+  if (lower === "bash" || lower.includes("bash") || lower.includes("terminal") || lower.includes("shell")) {
+    const command = args.command;
+    if (command) {
+      return { type: "bash", data: { command: String(command) } };
+    }
+  }
+
+  // Edit tool (skip if already handled by editToolDiff)
+  if (lower.includes("edit")) {
+    const filePath = args.file_path ?? args.filePath ?? args.path;
+    const oldString = args.old_string ?? args.oldString;
+    const newString = args.new_string ?? args.newString;
+    if (filePath && oldString != null && newString != null) {
+      return { type: "edit", data: { filePath: String(filePath), oldString: String(oldString).slice(0, 200), newString: String(newString).slice(0, 200) } };
+    }
+  }
+
+  return null;
+}
+
+function ToolInputView({ parsed }: { parsed: ParsedToolInput }) {
+  const { type, data } = parsed;
+  const [copied, setCopied] = useState(false);
+
+  const copyPath = (path: string) => {
+    navigator.clipboard.writeText(path).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  if (type === "write") {
+    const { filePath, contentLength, preview } = data as { filePath: string; contentLength: number; preview: string };
+    return <div className="tool-input-parsed">
+      <label>写入文件</label>
+      <div className="tool-file-path" onClick={() => copyPath(filePath)} title="点击复制路径">
+        {filePath}
+        {copied && <span className="copy-hint">已复制</span>}
+      </div>
+      <label>内容预览（{contentLength.toLocaleString()} 字符）</label>
+      <pre>{preview}{contentLength > 300 ? "\n…" : ""}</pre>
+    </div>;
+  }
+
+  if (type === "read") {
+    const { filePath, offset, limit } = data as { filePath: string; offset?: unknown; limit?: unknown };
+    return <div className="tool-input-parsed">
+      <label>读取文件</label>
+      <div className="tool-file-path" onClick={() => copyPath(filePath)} title="点击复制路径">
+        {filePath}
+        {copied && <span className="copy-hint">已复制</span>}
+      </div>
+      {(offset != null || limit != null) && <div className="tool-params">
+        {offset != null && <span>从第 {String(offset)} 行开始</span>}
+        {limit != null && <span>读取 {String(limit)} 行</span>}
+      </div>}
+    </div>;
+  }
+
+  if (type === "bash") {
+    const { command } = data as { command: string };
+    return <div className="tool-input-parsed">
+      <label>执行命令</label>
+      <pre className="bash-command">{command}</pre>
+    </div>;
+  }
+
+  if (type === "edit") {
+    const { filePath, oldString, newString } = data as { filePath: string; oldString: string; newString: string };
+    return <div className="tool-input-parsed">
+      <label>编辑文件</label>
+      <div className="tool-file-path" onClick={() => copyPath(filePath)} title="点击复制路径">
+        {filePath}
+        {copied && <span className="copy-hint">已复制</span>}
+      </div>
+      <label>替换内容</label>
+      <div className="edit-comparison">
+        <div className="edit-old">
+          <span className="edit-label">旧内容</span>
+          <pre>{oldString}</pre>
+        </div>
+        <div className="edit-arrow">→</div>
+        <div className="edit-new">
+          <span className="edit-label">新内容</span>
+          <pre>{newString}</pre>
+        </div>
+      </div>
+    </div>;
+  }
+
+  return null;
+}
 
 /** The pi edit tool reports a unified patch in result.details.patch; older or
  * failed runs fall back to the requested edits[] themselves. */
@@ -402,9 +539,29 @@ function clipToolText(value: string, cap = 20_000): string {
 function toolSummary(value: unknown): string {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const args = value as Record<string, unknown>;
-    for (const key of ["command", "path", "filePath", "file", "pattern", "query", "url"]) {
+    // Priority order: file operations first, then commands, then search/query
+    for (const key of ["path", "file_path", "filePath", "file", "command", "pattern", "query", "url", "prompt", "message"]) {
       const entry = args[key];
-      if (typeof entry === "string" && entry.trim()) return preview(entry);
+      if (typeof entry === "string" && entry.trim()) {
+        // For paths, show basename if too long
+        if (key.toLowerCase().includes("path") || key === "file") {
+          const path = entry.trim();
+          if (path.length > 50) {
+            const parts = path.split("/");
+            return parts.length > 1 ? `…/${parts.slice(-2).join("/")}` : preview(path);
+          }
+        }
+        return preview(entry);
+      }
+    }
+    // For Edit tool, extract old_string/new_string preview
+    const edits = args.edits;
+    if (Array.isArray(edits) && edits.length > 0) {
+      const first = edits[0];
+      if (first && typeof first === "object") {
+        const edit = first as Record<string, unknown>;
+        if (typeof edit.old_string === "string") return `替换: ${preview(edit.old_string)}`;
+      }
     }
   }
   return "";

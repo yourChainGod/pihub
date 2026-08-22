@@ -198,7 +198,7 @@ npm run build
 ```text
 app/api/             headless HTTP API routes and route tests
 app/page.tsx         minimal server status page
-bin/pi-web.js        stable supervisor entry point (legacy filename)
+bin/pihub-server.js  stable supervisor entry point
 bin/server-supervisor.js
                      child lifecycle and update IPC owner
 bin/pihub-server-install.js
@@ -219,6 +219,6 @@ docs/                current protocol and focused operator guides
 
 ## 上游与许可证
 
-PiHub Server 基于 [agegr/pi-web](https://github.com/agegr/pi-web) 的 MIT 代码持续改造，并依赖 [Pi Coding Agent](https://github.com/earendil-works/pi) 的运行时。它不再发布 Pi Web 的浏览器/PWA 界面；`bin/pi-web.js` 只作为包内入口文件名保留，公开命令均使用 `pihub-*`。
+PiHub Server 基于 [agegr/pi-web](https://github.com/agegr/pi-web) 的 MIT 代码持续改造，并依赖 [Pi Coding Agent](https://github.com/earendil-works/pi) 的运行时。它不再发布 Pi Web 的浏览器/PWA 界面；入口为 `bin/pihub-server.js`，公开命令均使用 `pihub-*`。
 
 许可文本见 [`LICENSE`](LICENSE)；项目级第三方声明见 [`../NOTICE.md`](../NOTICE.md) 与 [`../THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md)。

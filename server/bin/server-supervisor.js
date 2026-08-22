@@ -318,6 +318,8 @@ class StableServerSupervisor {
   childEnvironment(packageRoot, version) {
     return createServerRuntimeEnvironment(this.baseRuntimeEnvironment, {
       overrides: {
+        PIHUB_SERVER_HOSTNAME: this.hostname,
+        // Older releases only read the legacy variable; keep both in sync.
         PI_WEB_HOSTNAME: this.hostname,
         PIHUB_TAILNET_HOSTNAME: this.tailnetHostname,
         PIHUB_SERVER_VERSION: version,

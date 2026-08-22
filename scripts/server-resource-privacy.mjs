@@ -238,6 +238,11 @@ export function normalizePortableNextBuildPaths(serverDirectory, buildPaths, opt
     const relativePath = normalizeRelative(path.relative(nextRoot, filename));
     const normalized = stringLiteralReplacements(source, parse, roots, relativePath);
     if (normalized.replacements === 0 || encodedRoots.some((root) => normalized.output.includes(root))) {
+      if (process.env.PIHUB_PRIVACY_DEBUG === "1") {
+        const hit = encodedRoots.find((root) => normalized.output.includes(root));
+        const at = hit ? normalized.output.indexOf(hit) : -1;
+        console.error(`[privacy-debug] ${relativePath} @${at}: ${JSON.stringify(normalized.output.slice(Math.max(0, at - 160), at + 160))}`);
+      }
       throw new Error(`Generated Server JavaScript contains a build path outside a recognized string literal: ${relativePath}`);
     }
     fs.writeFileSync(filename, normalized.output, "utf8");

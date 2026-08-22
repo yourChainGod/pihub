@@ -1,6 +1,6 @@
 {
   "name": "@pihub/server",
-  "version": "0.0.3",
+  "version": "0.0.5",
   "description": "Tailnet-only Pi agent server for PiHub",
   "homepage": "https://github.com/yourChainGod/pihub#readme",
   "repository": {
@@ -16,7 +16,7 @@
     "node": ">=22.19.0"
   },
   "bin": {
-    "pihub-server": "bin/pi-web.js",
+    "pihub-server": "bin/pihub-server.js",
     "pihub-server-install": "bin/pihub-server-install.js",
     "pihub-server-service": "bin/pihub-server-install.js",
     "pihub-auth-admin": "bin/pihub-auth-admin.js",
@@ -50,7 +50,7 @@
     "dev:headless": "next dev -H 127.0.0.1 -p 30141",
     "build": "node ../scripts/build-portable-server.mjs",
     "start": "next start -H 127.0.0.1 -p 30141",
-    "start:headless": "node bin/pi-web.js --no-open",
+    "start:headless": "node bin/pihub-server.js --no-open",
     "lint": "eslint .",
     "test": "node --experimental-strip-types --test \"app/**/*.test.mjs\" \"bin/**/*.test.mjs\" \"lib/**/*.test.mjs\""
   },

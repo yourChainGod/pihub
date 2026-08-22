@@ -33,7 +33,8 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
     strict: false,
   });
 
-  const requestedHostname = cliArgs.hostname ?? env.PI_WEB_HOSTNAME ?? "127.0.0.1";
+  // PIHUB_SERVER_* is the preferred spelling; PI_WEB_* remains as a legacy fallback.
+  const requestedHostname = cliArgs.hostname ?? env.PIHUB_SERVER_HOSTNAME ?? env.PI_WEB_HOSTNAME ?? "127.0.0.1";
   if (!new Set(["127.0.0.1", "localhost", "::1", "[::1]"]).has(requestedHostname)) {
     throw new Error("PiHub server is Tailnet-only and must bind to loopback. Use tailscale serve instead of --hostname.");
   }
@@ -41,7 +42,7 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
   return {
       port: normalizePort(cliArgs.port ?? env.PORT ?? "30141"),
       hostname: "127.0.0.1",
-      openBrowser: !cliArgs["no-open"] && !isEnabled(env.PI_WEB_NO_OPEN),
+      openBrowser: !cliArgs["no-open"] && !isEnabled(env.PIHUB_SERVER_NO_OPEN ?? env.PI_WEB_NO_OPEN),
     };
 }
 

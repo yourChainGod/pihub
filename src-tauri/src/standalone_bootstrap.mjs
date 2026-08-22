@@ -1614,7 +1614,7 @@ async function validateBundledRuntime(root, version, withExtensions) {
     ".next/BUILD_ID",
     "node_modules/next/package.json",
     "node_modules/next/dist/bin/next",
-    "bin/pi-web.js",
+    "bin/pihub-server.js",
     "bin/runtime-entry.js",
   ]) {
     await assertRegularFile(path.join(root, ...relative.split("/")), `Server runtime file ${relative}`);
@@ -1824,6 +1824,8 @@ async function runCandidateHealth(versionRoot, version, options = {}) {
       PIHUB_HEADLESS: "1",
       PIHUB_SERVER_VERSION: version,
       PIHUB_SERVER_ROOT: versionRoot,
+      PIHUB_SERVER_HOSTNAME: "127.0.0.1",
+      // Older candidates only read the legacy variable; keep both in sync.
       PI_WEB_HOSTNAME: "127.0.0.1",
       PI_CODING_AGENT_DIR: path.join(options.stagingRoot, "candidate-agent"),
       PIHUB_AUTH_STATE_PATH: path.join(options.stagingRoot, "candidate-auth.json"),

@@ -1,6 +1,6 @@
 import type { LocalePlugin } from "../types";
 
-/** Pi Web 内置简体中文语言包。 */
+/** PiHub 内置简体中文语言包。 */
 export const zhCNLocale: LocalePlugin = {
   id: "zh-CN",
   label: "简体中文",
@@ -10,7 +10,7 @@ export const zhCNLocale: LocalePlugin = {
     "common.models": "模型",
     "common.skills": "技能",
     "common.plugins": "插件",
-    "appUpdate.releaseNotes": "Pi Web v{version} 可用，查看更新说明",
+    "appUpdate.releaseNotes": "PiHub v{version} 可用，查看更新说明",
     "sidebar.hide": "隐藏侧边栏",
     "sidebar.show": "显示侧边栏",
     "theme.light": "浅色模式（点击切换到深色）",

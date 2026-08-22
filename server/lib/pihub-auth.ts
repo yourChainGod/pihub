@@ -253,6 +253,10 @@ const PROTECTED_API_POLICY: readonly ProtectedApiPolicyRule[] = [
   { pattern: /^\/api\/pihub\/terminal(?:\/|$)/, methods: { GET: "terminal:use", POST: "terminal:use" } },
   { pattern: /^\/api\/pihub\/setup$/, methods: { GET: "system:manage", POST: "system:manage" } },
   { pattern: /^\/api\/pihub\/updates$/, methods: { GET: "system:update", POST: "system:update" } },
+  { pattern: /^\/api\/pihub\/components$/, methods: { GET: "system:update", POST: "system:update" } },
+  { pattern: /^\/api\/pihub\/todos$/, methods: { GET: "sessions:read", POST: "sessions:write" } },
+  { pattern: /^\/api\/pihub\/permissions$/, methods: { GET: "system:manage", POST: "system:manage", DELETE: "system:manage" } },
+  { pattern: /^\/api\/pihub\/subagents$/, methods: { GET: "sessions:read" } },
   { pattern: /^\/api\/app-update$/, methods: { GET: "system:update" } },
   {
     pattern: /^\/api\/pairing$/,

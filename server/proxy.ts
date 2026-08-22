@@ -71,7 +71,7 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next({ request: { headers: requestHeaders } });
   }
 
-  const password = process.env.PI_WEB_PASSWORD;
+  const password = process.env.PIHUB_SERVER_PASSWORD ?? process.env.PI_WEB_PASSWORD;
   if (
     isWebPasswordEnabled(password)
     && !isValidBasicAuthorization(request.headers.get("authorization"), password)
@@ -80,7 +80,7 @@ export async function proxy(request: NextRequest) {
       status: 401,
       headers: {
         "Cache-Control": "no-store",
-        "WWW-Authenticate": 'Basic realm="Pi Web", charset="UTF-8"',
+        "WWW-Authenticate": 'Basic realm="PiHub Server", charset="UTF-8"',
       },
     });
   }

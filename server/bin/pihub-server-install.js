@@ -641,7 +641,7 @@ async function installPersistentService({
   uid = typeof process.getuid === "function" ? process.getuid() : undefined,
   home = os.homedir(),
   nodePath = process.execPath,
-  serverPath = path.join(__dirname, "pi-web.js"),
+  serverPath = path.join(__dirname, "pihub-server.js"),
   environmentPath = process.env.PATH || "",
   runner = runCommand,
   healthCheck = waitForHealth,
@@ -672,7 +672,7 @@ async function getPersistentServiceStatus({
   uid = typeof process.getuid === "function" ? process.getuid() : undefined,
   home = os.homedir(),
   nodePath = process.execPath,
-  serverPath = path.join(__dirname, "pi-web.js"),
+  serverPath = path.join(__dirname, "pihub-server.js"),
   environmentPath = process.env.PATH || "",
   runner = runCommand,
   fetchImpl = globalThis.fetch,
@@ -749,7 +749,7 @@ async function uninstallLaunchAgent({ home, uid, runner }) {
     home,
     uid,
     nodePath: process.execPath,
-    serverPath: path.join(__dirname, "pi-web.js"),
+    serverPath: path.join(__dirname, "pihub-server.js"),
     environmentPath: process.env.PATH || "",
   });
   runRequired(runner, "launchctl", ["print", descriptor.domain], "The current user's launchd GUI domain is unavailable");
@@ -801,7 +801,7 @@ async function uninstallSystemdUserService({ home, runner }) {
     platform: "linux",
     home,
     nodePath: process.execPath,
-    serverPath: path.join(__dirname, "pi-web.js"),
+    serverPath: path.join(__dirname, "pihub-server.js"),
     environmentPath: process.env.PATH || "",
   });
   const snapshot = snapshotFile(descriptor.definitionPath);
@@ -872,7 +872,7 @@ async function uninstallPersistentService({
   uid = typeof process.getuid === "function" ? process.getuid() : undefined,
   home = os.homedir(),
   nodePath = process.execPath,
-  serverPath = path.join(__dirname, "pi-web.js"),
+  serverPath = path.join(__dirname, "pihub-server.js"),
   runner = runCommand,
 } = {}) {
   assertUnprivilegedUser(platform, uid);
@@ -913,7 +913,7 @@ async function getPersistentServiceLogs({
   uid = typeof process.getuid === "function" ? process.getuid() : undefined,
   home = os.homedir(),
   nodePath = process.execPath,
-  serverPath = path.join(__dirname, "pi-web.js"),
+  serverPath = path.join(__dirname, "pihub-server.js"),
   runner = runCommand,
 } = {}) {
   assertUnprivilegedUser(platform, uid);

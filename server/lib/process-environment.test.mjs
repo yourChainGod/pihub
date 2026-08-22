@@ -9,6 +9,7 @@ const {
 
 const SECRET_CANARIES = {
   PI_WEB_PASSWORD: "web-password-canary",
+  PIHUB_SERVER_PASSWORD: "pihub-server-password-canary",
   PIHUB_AUTH_SECRET: "auth-canary",
   OPENAI_API_KEY: "api-key-canary",
   github_token: "token-canary",

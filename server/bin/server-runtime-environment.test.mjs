@@ -36,6 +36,8 @@ test("server runtime keeps required Linux configuration and rejects unrelated se
     PI_CODING_AGENT_DIR: "/home/pi/.pi/agent",
     PI_WEB_ALLOWED_HOSTS: "host.example.ts.net",
     PI_WEB_PASSWORD: "server-auth-secret",
+    PIHUB_SERVER_ALLOWED_HOSTS: "server.example.ts.net",
+    PIHUB_SERVER_PASSWORD: "pihub-server-auth-secret",
     PIHUB_AUTH_STATE_PATH: "/home/pi/.pihub/auth.json",
     PIHUB_TERMINALS_PER_DEVICE: "4",
     PIHUB_WINDOWS_SHELL: "pwsh.exe",
@@ -44,6 +46,7 @@ test("server runtime keeps required Linux configuration and rejects unrelated se
   }, {
     platform: "linux",
     overrides: {
+      PIHUB_SERVER_HOSTNAME: "127.0.0.1",
       PI_WEB_HOSTNAME: "127.0.0.1",
       PIHUB_SERVER_ROOT: "/opt/pihub/server",
       PIHUB_SERVER_VERSION: "0.0.1",
@@ -65,10 +68,13 @@ test("server runtime keeps required Linux configuration and rejects unrelated se
     PI_CODING_AGENT_DIR: "/home/pi/.pi/agent",
     PI_WEB_ALLOWED_HOSTS: "host.example.ts.net",
     PI_WEB_PASSWORD: "server-auth-secret",
+    PIHUB_SERVER_ALLOWED_HOSTS: "server.example.ts.net",
+    PIHUB_SERVER_PASSWORD: "pihub-server-auth-secret",
     PIHUB_AUTH_STATE_PATH: "/home/pi/.pihub/auth.json",
     PIHUB_TERMINALS_PER_DEVICE: "4",
     PIHUB_WINDOWS_SHELL: "pwsh.exe",
     TS_SOCKET: "/run/tailscale/tailscaled.sock",
+    PIHUB_SERVER_HOSTNAME: "127.0.0.1",
     PI_WEB_HOSTNAME: "127.0.0.1",
     PIHUB_SERVER_ROOT: "/opt/pihub/server",
     PIHUB_SERVER_VERSION: "0.0.1",
@@ -131,7 +137,7 @@ test("source values cannot override production mode or derived launcher metadata
 });
 
 test("launcher and headless scripts keep the environment boundary cross-platform", () => {
-  const launcher = readFileSync(new URL("./pi-web.js", import.meta.url), "utf8");
+  const launcher = readFileSync(new URL("./pihub-server.js", import.meta.url), "utf8");
   const supervisor = readFileSync(new URL("./server-supervisor.js", import.meta.url), "utf8");
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -143,7 +149,7 @@ test("launcher and headless scripts keep the environment boundary cross-platform
   assert.doesNotMatch(launcher, /env:\s*\{\s*\.\.\.process\.env/);
   assert.doesNotMatch(supervisor, /env:\s*(?:\{\s*\.\.\.)?process\.env/);
   assert.equal(packageJson.scripts["dev:headless"], "next dev -H 127.0.0.1 -p 30141");
-  assert.equal(packageJson.scripts["start:headless"], "node bin/pi-web.js --no-open");
+  assert.equal(packageJson.scripts["start:headless"], "node bin/pihub-server.js --no-open");
   assert.doesNotMatch(packageJson.scripts["dev:headless"], /^[A-Za-z_][A-Za-z0-9_]*=/);
   assert.doesNotMatch(packageJson.scripts["start:headless"], /^[A-Za-z_][A-Za-z0-9_]*=/);
 });

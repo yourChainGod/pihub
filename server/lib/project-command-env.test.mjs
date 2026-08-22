@@ -304,7 +304,7 @@ test("direct bash updates the platform PATH key", async () => {
   }
 });
 
-test("a user extension keeps priority over the Pi Web fallback bash tool", async () => {
+test("a user extension keeps priority over the PiHub fallback bash tool", async () => {
   const userBash = {
     name: "user-bash",
     factory: (pi) => {

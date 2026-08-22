@@ -210,7 +210,7 @@ export async function GET(
       return privateSessionJson({ error: "Session not found" }, { status: 404 });
     }
 
-    const tempDir = join(tmpdir(), "pi-web-export");
+    const tempDir = join(tmpdir(), "pihub-server-export");
     mkdirSync(tempDir, { recursive: true });
 
     const sessionBase = basename(filePath, ".jsonl");
