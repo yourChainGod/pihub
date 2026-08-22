@@ -648,6 +648,20 @@ const AUDITED_SERVER_STAGING_PRIVACY_FINDINGS = new Map([
     }),
   ],
   [
+    "node_modules/@lydell/node-pty-win32-arm64/prebuilds/win32-arm64/conpty.pdb",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "e1b9db81b9b10f8b8b7eb3ad5c9375d4adb328933d8dbd830eaeea4ce447fa4b",
+    }),
+  ],
+  [
+    "node_modules/@lydell/node-pty-win32-arm64/prebuilds/win32-arm64/conpty_console_list.pdb",
+    Object.freeze({
+      rules: new Set(["absolute-user-path"]),
+      sha256: "21a3b6dc0600e4db43e1f1e3149daab199e333c064a65714fd61d5205a52ebfa",
+    }),
+  ],
+  [
     "node_modules/@next/swc-win32-x64-msvc/next-swc.win32-x64-msvc.node",
     Object.freeze({
       rules: new Set(["absolute-user-path"]),
