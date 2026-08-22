@@ -204,8 +204,9 @@ for (const [configPath, targets] of expectedTargets) {
 
 const tagFlag = process.argv.indexOf("--tag");
 const tag = tagFlag >= 0 ? process.argv[tagFlag + 1] : process.env.PIHUB_RELEASE_TAG;
-if (tag && tag !== `v${appVersion}`) {
-  errors.push(`release tag: expected v${appVersion}, got ${tag}`);
+// Server-only release chain: tags track the Server version.
+if (tag && tag !== `v${serverVersion}`) {
+  errors.push(`release tag: expected v${serverVersion}, got ${tag}`);
 }
 if (tag && process.env.GITHUB_ACTIONS === "true") {
   try {
