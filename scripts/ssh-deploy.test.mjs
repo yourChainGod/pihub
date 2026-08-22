@@ -173,11 +173,11 @@ test("decideAction distinguishes install, upgrade and blocked cases", () => {
 });
 
 test("parseArchiveUrl validates and splits the asset name", () => {
-  const info = parseArchiveUrl("http://100.100.100.1:10086/pihub-server-0.0.5-linux-x64.tar.gz");
+  const info = parseArchiveUrl("http://192.0.2.10:10086/pihub-server-0.0.5-linux-x64.tar.gz");
   assert.equal(info.version, "0.0.5");
   assert.equal(info.platform, "linux");
   assert.equal(info.arch, "x64");
-  assert.equal(info.sidecarUrl, "http://100.100.100.1:10086/pihub-server-0.0.5-linux-x64.tar.gz.sha256");
+  assert.equal(info.sidecarUrl, "http://192.0.2.10:10086/pihub-server-0.0.5-linux-x64.tar.gz.sha256");
 
   assert.throws(() => parseArchiveUrl("not-a-url"), /合法 URL/);
   assert.throws(() => parseArchiveUrl("ftp://host/pihub-server-0.0.5-linux-x64.tar.gz"), /http/);
@@ -194,7 +194,7 @@ test("parseSidecar enforces format and filename binding", () => {
 test("remote fetch and install commands carry url, sha256 and flags", () => {
   const sha = "b".repeat(64);
   const fetch = buildRemoteFetchCommand({
-    url: "http://100.100.100.1:10086/pihub-server-0.0.5-linux-x64.tar.gz",
+    url: "http://192.0.2.10:10086/pihub-server-0.0.5-linux-x64.tar.gz",
     sha256: sha,
     stageDir: "/root/.pihub-update",
   });

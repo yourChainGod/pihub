@@ -444,11 +444,10 @@ export async function readRemoteTerminal(device: Device, id: string, offset: num
 export async function loadRemoteSetup(device: Device): Promise<RemoteSetupStatus> { return remote(device, "/api/pihub/setup"); }
 
 /** The shared local release directory setting ("连接设置" → 本地发布包目录). */
-// Self-use build: default to this machine's release-artifacts so the updates
-// panel works out of the box; the settings field still overrides it.
-export const DEFAULT_LOCAL_RELEASE_DIR = "/Users/zhangshijie/Documents/Project/pihub/release-artifacts";
+// No machine-specific default: the releases panel asks for the directory once
+// and remembers it (privacy gates forbid shipping developer paths).
 export function localReleaseDirectory(): string {
-  return (localStorage.getItem("pihub-local-release-dir") ?? "").trim() || DEFAULT_LOCAL_RELEASE_DIR;
+  return (localStorage.getItem("pihub-local-release-dir") ?? "").trim();
 }
 
 export interface LocalComponentVersion {
