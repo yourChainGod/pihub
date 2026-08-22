@@ -296,7 +296,7 @@ function normalizeInstalledTree(document, { packageName, pathPrefix, stagingDire
         // Platform pruning intentionally removes non-target native packages
         // from the physical tree; they stay in the lock graph.
         if (prunedPackages?.has(packageNameFromTreePath(relative))) continue;
-        throw new Error("Server SBOM required dependency does not resolve to a physical package");
+        throw new Error(`Server SBOM required dependency does not resolve to a physical package: ${relative}`);
       }
       if (component.name !== metadata.name || component.version !== metadata.version) {
         throw new Error("Server SBOM dependency does not match its installed package");
