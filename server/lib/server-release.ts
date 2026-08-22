@@ -7,7 +7,7 @@ import {
 export const SERVER_RELEASE_OWNER = "yourChainGod";
 export const SERVER_RELEASE_REPO = "pihub";
 export const SERVER_RELEASE_CHANNEL = "stable";
-export const SERVER_RELEASE_PUBLIC_KEY = "2o1U_BIfYt1G_xYhSQBpAtHiQfTNi2ieUkxhvxBHkHI";
+export const SERVER_RELEASE_PUBLIC_KEY = "ixrL3WK-ykEJ3WDHEDiR6iN5oubnJXtZWkQQJp9T6lg";
 export const SERVER_RELEASE_MANIFEST_URL =
   `https://github.com/${SERVER_RELEASE_OWNER}/${SERVER_RELEASE_REPO}/releases/latest/download/release-manifest.json`;
 const SERVER_RELEASE_MANIFEST_CACHE_MS = 30_000;

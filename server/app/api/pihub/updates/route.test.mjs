@@ -46,7 +46,7 @@ test("pins the public repository and delegates mutations only to stable IPC", as
   assert.equal(serverRelease.SERVER_RELEASE_OWNER, "yourChainGod");
   assert.equal(serverRelease.SERVER_RELEASE_REPO, "pihub");
   assert.equal(serverRelease.SERVER_RELEASE_CHANNEL, "stable");
-  assert.equal(serverRelease.SERVER_RELEASE_PUBLIC_KEY, "2o1U_BIfYt1G_xYhSQBpAtHiQfTNi2ieUkxhvxBHkHI");
+  assert.equal(serverRelease.SERVER_RELEASE_PUBLIC_KEY, "ixrL3WK-ykEJ3WDHEDiR6iN5oubnJXtZWkQQJp9T6lg");
   assert.doesNotMatch(source, /registry\.npmjs|DefaultPackageManager|npm install|PIHUB_RELEASE_PUBLIC_KEY/);
   assert.doesNotMatch(source, /\btoken\s*:/i);
   assert.doesNotMatch(source, /__pihubServerUpdateRuntime|new UpdateEngine\(/);

@@ -21,12 +21,12 @@ pub(crate) struct BootstrapResult {
     requires_approval: bool,
     approval_url: Option<String>,
 }
-pub(crate) const PIHUB_SERVER_VERSION: &str = "0.0.7";
+pub(crate) const PIHUB_SERVER_VERSION: &str = "0.0.8";
 pub(crate) const PIHUB_SERVER_RELEASE_OWNER: &str = "yourChainGod";
 pub(crate) const PIHUB_SERVER_RELEASE_REPO: &str = "pihub";
 pub(crate) const PIHUB_SERVER_RELEASE_CHANNEL: &str = "stable";
 pub(crate) const PIHUB_SERVER_RELEASE_PUBLIC_KEY: &str =
-    "2o1U_BIfYt1G_xYhSQBpAtHiQfTNi2ieUkxhvxBHkHI";
+    "ixrL3WK-ykEJ3WDHEDiR6iN5oubnJXtZWkQQJp9T6lg";
 pub(crate) const PIHUB_SERVER_RELEASE_MANIFEST_URL: &str =
     "https://github.com/yourChainGod/pihub/releases/latest/download/release-manifest.json";
 pub(crate) const PIHUB_PI_AGENT_PACKAGE: &str = "@earendil-works/pi-coding-agent";
