@@ -294,8 +294,17 @@ function normalizeInstalledTree(document, { packageName, pathPrefix, stagingDire
         const lockEntry = lock.packages[relative];
         if (isRecord(lockEntry) && (lockEntry.peer === true || lockEntry.optional === true)) continue;
         // Platform pruning intentionally removes non-target native packages
-        // from the physical tree; they stay in the lock graph.
-        if (prunedPackages?.has(packageNameFromTreePath(relative))) continue;
+        // from the physical tree; they stay in the lock graph. Nested
+        // dependencies of a pruned package (e.g. onnxruntime-common under
+        // onnxruntime-web) disappear with it.
+        if (prunedPackages) {
+          const name = packageNameFromTreePath(relative);
+          const pruned = [...prunedPackages].some((pkg) => {
+            const dir = `node_modules/${pkg}`;
+            return name === pkg || relative.includes(`${dir}/`);
+          });
+          if (pruned) continue;
+        }
         throw new Error(`Server SBOM required dependency does not resolve to a physical package: ${relative}`);
       }
       if (component.name !== metadata.name || component.version !== metadata.version) {

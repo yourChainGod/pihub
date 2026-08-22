@@ -73,6 +73,9 @@ const PLACEHOLDER_USERS = new Set([
   "redacted",
   "root",
   "runner",
+  // GitHub-hosted Windows runners build under C:\Users\runneradmin — a
+  // fixed CI identity, not developer data (same class as "runner").
+  "runneradmin",
   "test",
   "tester",
   "ubuntu",
