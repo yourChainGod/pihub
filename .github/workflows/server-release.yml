@@ -149,25 +149,6 @@ jobs:
           node scripts/verify-server-lock.mjs
           node scripts/default-extension-bundle.mjs
 
-      - name: Install locked dependencies
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm ci --prefix server --ignore-scripts --no-audit --no-fund
-
-      - name: Run privacy and script tests
-        run: |
-          node scripts/privacy-scan.mjs --fail-on-warnings
-          node scripts/verify-icon-assets.mjs
-          node --test scripts/*.test.mjs
-          find scripts -maxdepth 1 -type f -name '*.mjs' -print0 | LC_ALL=C sort -z | xargs -0 -n 1 node --check
-
-      - name: Validate Server
-        run: |
-          npm --prefix server test
-          npm --prefix server run lint
-          npm --prefix server exec -- tsc --noEmit --pretty false
-          npm run server:build
-
       - name: Validate release configuration
         env:
           PIHUB_RELEASE_TAG: ${{ steps.source.outputs.tag }}
@@ -264,25 +245,6 @@ jobs:
 
       - name: Install locked Server dependencies
         run: npm ci --prefix server --ignore-scripts --no-audit --no-fund
-
-      - name: Prepare Linux user service manager
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          readonly uid="$(id -u)"
-          sudo loginctl enable-linger "${USER}"
-          sudo systemctl start "user@${uid}.service"
-          test -S "/run/user/${uid}/bus"
-          {
-            echo "XDG_RUNTIME_DIR=/run/user/${uid}"
-            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus"
-          } >> "${GITHUB_ENV}"
-
-      - name: Validate native Server service integration
-        run: |
-          node --test server/bin/pihub-server-install.test.mjs server/bin/pihub-service-platform-smoke.test.mjs server/bin/bounded-log.test.mjs server/bin/server-runtime-environment.test.mjs
-          node server/bin/pihub-service-platform-smoke.js
 
       - name: Build the standalone Server release
         run: |

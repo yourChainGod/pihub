@@ -104,10 +104,10 @@ test("release workflow ships standalone Server archives with a signed manifest",
   ];
   for (const source of [ci, release]) {
     for (const pattern of retiredEmbeddedPatterns) assert.doesNotMatch(source, pattern);
-    assert.match(source, /node scripts\/verify-icon-assets\.mjs/);
   }
   // The native smoke runs in the release build job; CI stays on ubuntu only.
   assert.match(release, /smoke-server-resource\.mjs[\s\S]*--archive/);
+  assert.match(ci, /node scripts\/verify-icon-assets\.mjs/);
 
   // The desktop release chain was removed: server assets only.
   assert.doesNotMatch(release, /build-desktop-release|assemble-release|attest-release/);

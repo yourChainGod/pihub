@@ -281,6 +281,9 @@ try {
       "sbom",
       "--omit=dev",
       "--omit=peer",
+      // The extension lock intentionally omits host-provided Pi peer records;
+      // without legacy peer semantics npm sbom fails with ESBOMPROBLEMS.
+      "--legacy-peer-deps",
       "--package-lock-only",
       "--sbom-format=cyclonedx",
       "--sbom-type=application",
