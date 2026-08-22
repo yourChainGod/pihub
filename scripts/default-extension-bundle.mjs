@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 
 import { verifyServerLock } from "./verify-server-lock.mjs";
 import { npmSpawnInvocation, prepareSecureNpmEnvironment } from "./secure-npm-environment.mjs";
+import { pruneExtensionPlatformModules } from "./server-resource-privacy.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 
@@ -943,6 +944,8 @@ export async function stageDefaultExtensionBundle({
   run,
   serverRoot,
   sourceDirectory = DEFAULT_EXTENSION_SOURCE_DIRECTORY,
+  platform,
+  arch,
 } = {}) {
   if (!destinationDirectory || !serverRoot) throw new Error("Extension staging requires destination and Server roots");
   const toolchain = assertExtensionBuildToolchain(run);
@@ -954,6 +957,11 @@ export async function stageDefaultExtensionBundle({
   installDefaultExtensionDependencies(run, destinationDirectory);
   const hiddenLock = path.join(destinationDirectory, "node_modules", ".package-lock.json");
   if (fs.existsSync(hiddenLock)) fs.rmSync(hiddenLock);
+  // A release archive targets exactly one platform/arch: drop every other
+  // native payload before the inventory is computed over the staged tree.
+  if (platform && arch) {
+    pruneExtensionPlatformModules(destinationDirectory, { platform, arch });
+  }
   const preInventory = await verifyDefaultExtensionBundle(destinationDirectory, {
     expectedVersion,
     requireInventory: false,

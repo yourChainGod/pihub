@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 
 import {
   isAuditedServerStagingPrivacyFinding,
-  pruneNonTargetPlatformModules,
+  pruneServerRuntimePlatformModules,
   pruneServerDependencyTree,
   scanServerStagingTree,
 } from "./server-resource-privacy.mjs";
@@ -198,6 +198,8 @@ try {
     destinationDirectory: path.join(stageDirectory, "extensions"),
     expectedVersion: version,
     serverRoot: stageDirectory,
+    platform,
+    arch,
   });
   fs.writeFileSync(
     path.join(stageDirectory, DEFAULT_EXTENSION_NOTICE_FILE),
@@ -205,9 +207,9 @@ try {
     { encoding: "utf8", flag: "wx", mode: 0o644 },
   );
 
-  // The staged tree contains every platform's optional native binaries; a
-  // release archive runs on exactly one platform/arch.
-  const platformPruning = pruneNonTargetPlatformModules(stageDirectory, { platform, arch });
+  // The staged server tree contains every platform's optional native binaries;
+  // a release archive runs on exactly one platform/arch.
+  const platformPruning = pruneServerRuntimePlatformModules(stageDirectory, { platform, arch });
 
   const stagingScan = await scanServerStagingTree(stageDirectory, {
     limits: {

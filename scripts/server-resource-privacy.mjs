@@ -507,22 +507,54 @@ export function pruneServerDependencyTree(nodeModulesDirectory, options = {}) {
 /**
  * Remove native/binary payload that can never run on the target platform.
  *
- * The staged tree comes from `npm ci --include=optional`, which materializes
- * every optional platform variant (all onnxruntime/swc/sharp/fff binaries).
- * A release archive targets exactly one platform/arch, so the rest is dead
- * weight — this is what made the archive ~300MB. Rules:
+ * The staged tree comes from `npm ci --omit=peer` inside
+ * stageDefaultExtensionBundle, which materializes every optional platform
+ * variant. Rules (extension tree, rooted at the directory containing
+ * node_modules):
  *
  * - onnxruntime-web: browser-only backend, never loaded under Node.
  * - onnxruntime-node/bin/napi-v6/<platform>/<arch>: keep only the target.
  * - @img/sharp*: keep only the target variant (glibc build for linux);
  *   @huggingface/transformers imports sharp at module load, so the target
  *   package itself must stay loadable.
- * - @next/swc-*: build-time compiler; the production server never loads it.
  * - @ff-labs/fff-bin-*: keep only the target variant (glibc for linux).
- *
- * Returns the list of removed relative paths.
  */
-export function pruneNonTargetPlatformModules(stageDirectory, { platform, arch }) {
+export function pruneExtensionPlatformModules(extensionsRoot, { platform, arch }) {
+  const root = path.resolve(extensionsRoot);
+  const removed = [];
+  const removeIfPresent = (relative) => {
+    const target = path.join(root, ...relative.split("/"));
+    const info = fs.lstatSync(target, { throwIfNoEntry: false });
+    if (!info) return;
+    if (info.isSymbolicLink()) throw new Error(`Refusing to prune a symlink: ${relative}`);
+    fs.rmSync(target, { recursive: true, force: true });
+    removed.push(relative);
+  };
+  const keepUnder = (relative, keep) => {
+    const target = path.join(root, ...relative.split("/"));
+    const info = fs.lstatSync(target, { throwIfNoEntry: false });
+    if (!info?.isDirectory() || info.isSymbolicLink()) return;
+    for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+      if (!keep(entry.name)) removeIfPresent(`${relative}/${entry.name}`);
+    }
+  };
+
+  removeIfPresent("node_modules/onnxruntime-web");
+  keepUnder("node_modules/onnxruntime-node/bin/napi-v6", (name) => name === platform);
+  keepUnder(`node_modules/onnxruntime-node/bin/napi-v6/${platform}`, (name) => name === arch);
+  const imgKeep = targetImgPackageNames(platform, arch);
+  keepUnder("node_modules/@img", (name) => imgKeep.has(name));
+  const fffKeep = `fff-bin-${platform}-${arch}${platform === "linux" ? "-gnu" : ""}`;
+  keepUnder("node_modules/@ff-labs", (name) => !name.startsWith("fff-bin-") || name === fffKeep);
+  return removed;
+}
+
+/**
+ * Server runtime tree pruning: @next/swc-* is the build-time compiler and is
+ * never loaded by `next start`; @img/sharp serves next/image, which the
+ * headless device server does not use — the whole @img scope goes.
+ */
+export function pruneServerRuntimePlatformModules(stageDirectory, { platform, arch }) {
   const root = path.resolve(stageDirectory);
   const removed = [];
   const removeIfPresent = (relative) => {
@@ -542,23 +574,9 @@ export function pruneNonTargetPlatformModules(stageDirectory, { platform, arch }
     }
   };
 
-  // onnxruntime
-  removeIfPresent("extensions/node_modules/onnxruntime-web");
-  keepUnder("extensions/node_modules/onnxruntime-node/bin/napi-v6", (name) => name === platform);
-  keepUnder(`extensions/node_modules/onnxruntime-node/bin/napi-v6/${platform}`, (name) => name === arch);
-
-  // sharp/libvips (@img) in both trees
+  keepUnder("node_modules/@next", (name) => !name.startsWith("swc-"));
   const imgKeep = targetImgPackageNames(platform, arch);
   keepUnder("node_modules/@img", (name) => imgKeep.has(name));
-  keepUnder("extensions/node_modules/@img", (name) => imgKeep.has(name));
-
-  // swc: compile-time only, never loaded by `next start`
-  keepUnder("node_modules/@next", (name) => !name.startsWith("swc-"));
-
-  // fff native binaries
-  const fffKeep = `fff-bin-${platform}-${arch}${platform === "linux" ? "-gnu" : ""}`;
-  keepUnder("extensions/node_modules/@ff-labs", (name) => !name.startsWith("fff-bin-") || name === fffKeep);
-
   return removed;
 }
 

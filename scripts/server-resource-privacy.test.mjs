@@ -19,8 +19,9 @@ import {
   isAuditedServerStagingArchiveFinding,
   isAuditedServerStagingPrivacyFinding,
   normalizePortableNextBuildPaths,
-  pruneNonTargetPlatformModules,
+  pruneExtensionPlatformModules,
   pruneServerBuildMetadata,
+  pruneServerRuntimePlatformModules,
   pruneServerDependencyTree,
   scanServerStagingTree,
   stripWasmCustomSections,
@@ -284,7 +285,38 @@ test("audited archive findings verify against the streamed member hash", () => {
   );
 });
 
-test("platform pruning keeps only target native payloads", (t) => {
+test("extension platform pruning keeps only target native payloads", (t) => {
+  const staging = fs.mkdtempSync(path.join(tmpdir(), "pihub-platform-prune-"));
+  t.after(() => fs.rmSync(staging, { recursive: true, force: true }));
+  const touch = (relative) => {
+    const target = path.join(staging, ...relative.split("/"));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, "x");
+  };
+  touch("node_modules/onnxruntime-web/dist/ort.web.js");
+  touch("node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime.so.1");
+  touch("node_modules/onnxruntime-node/bin/napi-v6/darwin/arm64/libonnxruntime.dylib");
+  touch("node_modules/@img/sharp-linux-x64/sharp.node");
+  touch("node_modules/@img/sharp-libvips-linuxmusl-x64/libvips.so");
+  touch("node_modules/@ff-labs/fff-bin-linux-x64-gnu/fff");
+  touch("node_modules/@ff-labs/fff-bin-linux-x64-musl/fff");
+  touch("node_modules/pi-todo-rail/index.ts");
+
+  const removed = pruneExtensionPlatformModules(staging, { platform: "linux", arch: "x64" });
+
+  const exists = (relative) => fs.existsSync(path.join(staging, ...relative.split("/")));
+  assert.ok(!exists("node_modules/onnxruntime-web"));
+  assert.ok(exists("node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime.so.1"));
+  assert.ok(!exists("node_modules/onnxruntime-node/bin/napi-v6/darwin"));
+  assert.ok(exists("node_modules/@img/sharp-linux-x64/sharp.node"));
+  assert.ok(!exists("node_modules/@img/sharp-libvips-linuxmusl-x64"));
+  assert.ok(exists("node_modules/@ff-labs/fff-bin-linux-x64-gnu/fff"));
+  assert.ok(!exists("node_modules/@ff-labs/fff-bin-linux-x64-musl"));
+  assert.ok(exists("node_modules/pi-todo-rail/index.ts"));
+  assert.ok(removed.length >= 4);
+});
+
+test("server runtime pruning drops swc and non-target sharp variants", (t) => {
   const staging = fs.mkdtempSync(path.join(tmpdir(), "pihub-platform-prune-"));
   t.after(() => fs.rmSync(staging, { recursive: true, force: true }));
   const touch = (relative) => {
@@ -295,49 +327,17 @@ test("platform pruning keeps only target native payloads", (t) => {
   touch("node_modules/@next/swc-linux-x64-gnu/swc.node");
   touch("node_modules/@next/swc-win32-x64-msvc/swc.node");
   touch("node_modules/@next/other-pkg/index.js");
+  touch("node_modules/@img/sharp-darwin-arm64/sharp.node");
+  touch("node_modules/@img/sharp-libvips-darwin-arm64/libvips.dylib");
   touch("node_modules/@img/sharp-linux-x64/sharp.node");
-  touch("node_modules/@img/sharp-libvips-linuxmusl-x64/libvips.so");
-  touch("extensions/node_modules/onnxruntime-web/dist/ort.web.js");
-  touch("extensions/node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime.so.1");
-  touch("extensions/node_modules/onnxruntime-node/bin/napi-v6/darwin/arm64/libonnxruntime.dylib");
-  touch("extensions/node_modules/@img/sharp-linux-x64/sharp.node");
-  touch("extensions/node_modules/@ff-labs/fff-bin-linux-x64-gnu/fff");
-  touch("extensions/node_modules/@ff-labs/fff-bin-linux-x64-musl/fff");
-  touch("extensions/node_modules/pi-todo-rail/index.ts");
 
-  const removed = pruneNonTargetPlatformModules(staging, { platform: "linux", arch: "x64" });
+  pruneServerRuntimePlatformModules(staging, { platform: "darwin", arch: "arm64" });
 
   const exists = (relative) => fs.existsSync(path.join(staging, ...relative.split("/")));
   assert.ok(!exists("node_modules/@next/swc-linux-x64-gnu"));
   assert.ok(!exists("node_modules/@next/swc-win32-x64-msvc"));
   assert.ok(exists("node_modules/@next/other-pkg/index.js"));
-  assert.ok(exists("node_modules/@img/sharp-linux-x64/sharp.node"));
-  assert.ok(!exists("node_modules/@img/sharp-libvips-linuxmusl-x64"));
-  assert.ok(!exists("extensions/node_modules/onnxruntime-web"));
-  assert.ok(exists("extensions/node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime.so.1"));
-  assert.ok(!exists("extensions/node_modules/onnxruntime-node/bin/napi-v6/darwin"));
-  assert.ok(exists("extensions/node_modules/@img/sharp-linux-x64/sharp.node"));
-  assert.ok(exists("extensions/node_modules/@ff-labs/fff-bin-linux-x64-gnu/fff"));
-  assert.ok(!exists("extensions/node_modules/@ff-labs/fff-bin-linux-x64-musl"));
-  assert.ok(exists("extensions/node_modules/pi-todo-rail/index.ts"));
-  assert.ok(removed.length >= 5);
-});
-
-test("platform pruning for darwin keeps darwin variants", (t) => {
-  const staging = fs.mkdtempSync(path.join(tmpdir(), "pihub-platform-prune-"));
-  t.after(() => fs.rmSync(staging, { recursive: true, force: true }));
-  const touch = (relative) => {
-    const target = path.join(staging, ...relative.split("/"));
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, "x");
-  };
-  touch("node_modules/@img/sharp-darwin-arm64/sharp.node");
-  touch("node_modules/@img/sharp-libvips-darwin-arm64/libvips.dylib");
-  touch("node_modules/@img/sharp-linux-x64/sharp.node");
-
-  pruneNonTargetPlatformModules(staging, { platform: "darwin", arch: "arm64" });
-
-  assert.ok(fs.existsSync(path.join(staging, "node_modules/@img/sharp-darwin-arm64/sharp.node")));
-  assert.ok(fs.existsSync(path.join(staging, "node_modules/@img/sharp-libvips-darwin-arm64/libvips.dylib")));
-  assert.ok(!fs.existsSync(path.join(staging, "node_modules/@img/sharp-linux-x64")));
+  assert.ok(exists("node_modules/@img/sharp-darwin-arm64/sharp.node"));
+  assert.ok(exists("node_modules/@img/sharp-libvips-darwin-arm64/libvips.dylib"));
+  assert.ok(!exists("node_modules/@img/sharp-linux-x64"));
 });
