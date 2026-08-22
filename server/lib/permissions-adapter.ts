@@ -232,7 +232,7 @@ export class UnifiedPermissionSystem {
 
     try {
       const pihubConfig = this.loadPihubConfig();
-      let piConfig = this.loadPiConfig() || this.getDefaultPiConfig();
+      const piConfig = this.loadPiConfig() || this.getDefaultPiConfig();
 
       // 将 PiHub 规则合并到 Pi 配置
       const permission = (piConfig.permission as Record<string, unknown>) || {};

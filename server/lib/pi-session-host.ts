@@ -93,7 +93,8 @@ export class ProcessIsolatedSessionWrapper {
     this._sessionId = requestedSessionId;
     this.ownerId = ownerId;
 
-    // Build inner stub — properties are filled in after the worker confirms init
+    // Build inner stub — properties are filled in after the worker confirms init.
+    // eslint-disable-next-line @typescript-eslint/no-this-alias -- the stub's own `this` differs from the wrapper.
     const self = this;
     this.inner = {
       get sessionId() { return self._sessionId; },
