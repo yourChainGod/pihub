@@ -325,6 +325,7 @@ test("server runtime pruning drops swc and non-target sharp variants", (t) => {
     fs.writeFileSync(target, "x");
   };
   touch("node_modules/@next/swc-linux-x64-gnu/swc.node");
+  touch("node_modules/@next/swc-darwin-arm64/swc.node");
   touch("node_modules/@next/swc-win32-x64-msvc/swc.node");
   touch("node_modules/@next/other-pkg/index.js");
   touch("node_modules/@img/sharp-darwin-arm64/sharp.node");
@@ -334,6 +335,8 @@ test("server runtime pruning drops swc and non-target sharp variants", (t) => {
   pruneServerRuntimePlatformModules(staging, { platform: "darwin", arch: "arm64" });
 
   const exists = (relative) => fs.existsSync(path.join(staging, ...relative.split("/")));
+  // swc for the target platform stays (next start lazy-downloads it otherwise)
+  assert.ok(exists("node_modules/@next/swc-darwin-arm64/swc.node"));
   assert.ok(!exists("node_modules/@next/swc-linux-x64-gnu"));
   assert.ok(!exists("node_modules/@next/swc-win32-x64-msvc"));
   assert.ok(exists("node_modules/@next/other-pkg/index.js"));

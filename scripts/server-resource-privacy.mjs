@@ -550,9 +550,12 @@ export function pruneExtensionPlatformModules(extensionsRoot, { platform, arch }
 }
 
 /**
- * Server runtime tree pruning: @next/swc-* is the build-time compiler and is
- * never loaded by `next start`; @img/sharp serves next/image, which the
- * headless device server does not use — the whole @img scope goes.
+ * Server runtime tree pruning. `next start` lazily downloads any missing
+ * @next/swc package for the current platform AND libc flavor (observed on
+ * 0.0.6: it fetched both -gnu and -musl on a glibc host), so the target
+ * platform's variants must stay — only other platforms/arches go.
+ * @img/sharp serves next/image, which the headless device server does not
+ * use; keep only the target variant for size.
  */
 export function pruneServerRuntimePlatformModules(stageDirectory, { platform, arch }) {
   const root = path.resolve(stageDirectory);
@@ -574,10 +577,21 @@ export function pruneServerRuntimePlatformModules(stageDirectory, { platform, ar
     }
   };
 
-  keepUnder("node_modules/@next", (name) => !name.startsWith("swc-"));
+  const swcKeep = targetSwcPackageNames(platform, arch);
+  keepUnder("node_modules/@next", (name) => !name.startsWith("swc-") || swcKeep.has(name));
   const imgKeep = targetImgPackageNames(platform, arch);
   keepUnder("node_modules/@img", (name) => imgKeep.has(name));
   return removed;
+}
+
+function targetSwcPackageNames(platform, arch) {
+  if (platform === "linux") {
+    return new Set([`swc-linux-${arch}-gnu`, `swc-linux-${arch}-musl`]);
+  }
+  if (platform === "darwin") {
+    return new Set([`swc-darwin-${arch}`]);
+  }
+  return new Set([`swc-win32-${arch}-msvc`]);
 }
 
 function targetImgPackageNames(platform, arch) {
