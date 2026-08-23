@@ -391,6 +391,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          set -x
           readonly tag="${PIHUB_RELEASE_TAG}"
           readonly commit="${PIHUB_RELEASE_COMMIT}"
           readonly expected_list="${RUNNER_TEMP}/expected-assets.txt"
