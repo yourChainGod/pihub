@@ -427,7 +427,7 @@ jobs:
               <<<"${release_json}" >/dev/null
             release_id="$(jq -er '.id' <<<"${release_json}")"
             gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
-              | jq -r '.[].name' | LC_ALL=C sort > "${current_list}"
+              | jq -r '.[][].name' | LC_ALL=C sort > "${current_list}"
             if [[ -s "${current_list}" ]] && comm -23 "${current_list}" "${expected_list}" | grep -q .; then
               echo "Existing draft contains an unexpected asset; refusing to modify it" >&2
               exit 1
@@ -462,5 +462,5 @@ jobs:
           done < "${missing_list}"
 
           gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
-            | jq -r '.[].name' | LC_ALL=C sort > "${current_list}"
+            | jq -r '.[][].name' | LC_ALL=C sort > "${current_list}"
           diff -u "${expected_list}" "${current_list}"
