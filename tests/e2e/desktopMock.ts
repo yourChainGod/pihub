@@ -458,6 +458,30 @@ export async function installDesktopMock(page: Page, options: DesktopMockOptions
         if (action === "delete") newApiConfig = { ...newApiConfig, providers: newApiConfig.providers.filter((provider) => provider.name !== body.name) };
         return clone(newApiConfig);
       }
+      if (path === "/api/pihub/components") {
+        if (method === "POST") {
+          const component = String(body.component ?? "");
+          if (component !== "pi" && component !== "extensions") throw new Error("Unknown component; expected 'pi' or 'extensions'");
+          if (body.action !== "update") throw new Error("Only 'update' action is supported");
+          if (runningSessionIds.size > 0 && body.force !== true) throw new Error("busy: Agent sessions are still running");
+          return { accepted: true, jobId: "job-components" };
+        }
+        const items = [
+          { name: "@cortexkit/pi-magic-context", version: "0.38.0" },
+          { name: "pi-todo-rail", version: staleComponent === "plugin" ? "0.2.0" : "0.2.3" },
+          { name: "@ff-labs/pi-fff", version: "0.10.5" },
+          { name: "pi-simplify", version: "0.2.3" },
+          { name: "@gotgenes/pi-permission-system", version: "26.3.0" },
+          { name: "@eko24ive/pi-ask", version: "1.2.0" },
+          { name: "@gotgenes/pi-subagents", version: "19.3.2" },
+        ];
+        return {
+          server: { current: serverVersion, mode: "legacy" },
+          pi: { current: staleComponent === "pi" ? "0.83.0" : "0.84.2", available: true, binary: "bundled" },
+          extensions: { items, count: items.length, managedBy: "pi" },
+          checkedAt: now,
+        };
+      }
       if (path === "/api/pihub/setup") return {
         platform: { os: serverOs, remoteAccess: serverOs === "win32" ? "openssh" : "tailscale-ssh", openSshRunning: true, terminalBackend: serverOs === "win32" ? "ConPTY" : "pty", preferredShell: serverOs === "win32" ? "PowerShell 7" : "zsh" },
         tailscale: { installed: true, connected: true, dnsName: "studio.tailnet.ts.net", sshEnabled: true, serveEnabled: true, serveUrl: "https://studio.tailnet.ts.net" },

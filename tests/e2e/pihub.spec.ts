@@ -360,10 +360,6 @@ async function openUpdatesPanel(page: Parameters<typeof installDesktopMock>[0]) 
   return dialog;
 }
 
-async function seedLocalReleaseDir(page: Parameters<typeof installDesktopMock>[0], directory: string) {
-  await page.addInitScript((value) => localStorage.setItem("pihub-local-release-dir", value), directory);
-}
-
 test.describe("桌面版本展示", () => {
   test("桌面行只读展示当前版本，不再触发检查、下载或重启命令", async ({ page }) => {
     await page.setViewportSize({ width: 1180, height: 800 });
@@ -975,149 +971,99 @@ test.describe("模型配置", () => {
   });
 });
 
-test.describe("Server 本地直传更新", () => {
-  test("检测到本地新包后经 SSH 直传安装，不再请求 GitHub 更新接口", async ({ page }) => {
+test.describe("Server GitHub 签名更新", () => {
+  test("检测到 GitHub 新版本后经 supervisor 安装", async ({ page }) => {
     await page.setViewportSize({ width: 1180, height: 800 });
-    await seedLocalReleaseDir(page, "/tmp/pihub-release");
-    await installDesktopMock(page);
+    await installDesktopMock(page, { updateScenario: "available" });
     const dialog = await openUpdatesPanel(page);
     const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
 
-    await expect(server).toContainText("当前 v0.0.1 · 本地包 v0.0.2");
-    await server.getByRole("button", { name: "直传安装 v0.0.2" }).click();
-    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible();
-    await expect(dialog.locator(".bootstrap-log")).toContainText("直传安装完成");
-    await expect(dialog.locator(".bootstrap-log")).not.toContainText("PIHUB_PAIRING_CODE");
+    await expect(server).toContainText("当前 v0.0.1 · GitHub stable 最新 v0.0.2");
+    await server.getByRole("button", { name: "安装 v0.0.2" }).click();
+    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible({ timeout: 20000 });
+    await expect(dialog.locator(".update-phase.succeeded")).toContainText("v0.0.2");
     await expect(server).toContainText("已就绪");
 
-    const bootstrapCalls = (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer");
-    expect(bootstrapCalls).toHaveLength(1);
-    expect(bootstrapCalls[0].args).toMatchObject({
-      host: "studio.tailnet.ts.net",
-      os: "darwin",
-      installDefaultExtensions: true,
-      localArchiveDir: "/tmp/pihub-release",
-      autoPair: false,
-    });
-    // 更新会重装默认插件，让 facade 指向新版本目录
-    expect((bootstrapCalls[0].args?.selectedExtensions as string[]).length).toBe(7);
-    expect((await desktopCalls(page)).filter((call) => call.args?.path === "/api/pihub/updates")).toHaveLength(0);
+    const updateCalls = (await desktopCalls(page)).filter((call) => call.args?.path === "/api/pihub/updates");
+    expect(updateCalls.some((call) => call.args?.method === "POST")).toBe(true);
+    // GitHub 流程由服务端 supervisor 下载安装，桌面端不再 SSH 直传
+    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(0);
+    expect((await desktopCalls(page)).filter((call) => call.command === "check_local_server_update")).toHaveLength(0);
   });
 
-  test("有会话运行时需确认重启后才直传，Esc 只关闭最上层确认框", async ({ page }) => {
+  test("有会话运行时需确认后才强制更新，Esc 只关闭最上层确认框", async ({ page }) => {
     await page.setViewportSize({ width: 1180, height: 800 });
-    await seedLocalReleaseDir(page, "/tmp/pihub-release");
-    await installDesktopMock(page);
+    await installDesktopMock(page, { updateScenario: "busy" });
     const dialog = await openUpdatesPanel(page);
     const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
-    await expect(server.getByRole("button", { name: "直传安装 v0.0.2" })).toBeEnabled();
+    await expect(server.getByRole("button", { name: "安装 v0.0.2" })).toBeEnabled();
     await setDesktopRunningSessions(page, ["session-1"]);
 
-    await server.getByRole("button", { name: "直传安装 v0.0.2" }).click();
+    await server.getByRole("button", { name: "安装 v0.0.2" }).click();
     const confirm = page.getByRole("alertdialog", { name: /有会话正在运行/ });
     await expect(confirm).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(confirm).toHaveCount(0);
     await expect(dialog).toBeVisible();
-    await expect(server.getByRole("button", { name: "直传安装 v0.0.2" })).toBeFocused();
-    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(0);
+    await expect(server.getByRole("button", { name: "安装 v0.0.2" })).toBeFocused();
+    expect((await desktopCalls(page)).filter((call) => call.args?.path === "/api/pihub/updates" && call.args?.method === "POST")).toHaveLength(0);
 
-    await server.getByRole("button", { name: "直传安装 v0.0.2" }).click();
+    await server.getByRole("button", { name: "安装 v0.0.2" }).click();
     await confirm.getByRole("button", { name: "强制更新" }).click();
-    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible();
-    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(1);
+    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible({ timeout: 20000 });
+    const posts = (await desktopCalls(page)).filter((call) => call.args?.path === "/api/pihub/updates" && call.args?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect((posts[0].args?.body as { force?: boolean }).force).toBe(true);
   });
 
-  test("组件版本与本地包不一致时提示直传同步组件", async ({ page }) => {
-    await page.setViewportSize({ width: 1180, height: 800 });
-    await seedLocalReleaseDir(page, "/tmp/pihub-release");
-    await installDesktopMock(page, { localUpdateScenario: "none", staleComponent: "plugin" });
+  test("已是最新时显示已就绪", async ({ page }) => {
+    await installDesktopMock(page, { updateScenario: "none" });
+    const dialog = await openUpdatesPanel(page);
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
+    await expect(server).toContainText("当前 v0.0.1 · GitHub stable 最新 v0.0.1");
+    await expect(server).toContainText("已就绪");
+    await expect(dialog.getByRole("button", { name: /安装 v/ })).toHaveCount(0);
+  });
+
+  test("签名清单校验失败时显示错误并可重新检查", async ({ page }) => {
+    await installDesktopMock(page, { updateScenario: "signature-failure" });
+    const dialog = await openUpdatesPanel(page);
+    await expect(dialog.getByRole("alert")).toContainText("Signed public release could not be verified");
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
+    await expect(server).toContainText("GitHub 更新检查失败");
+    await server.getByRole("button", { name: "重新检查" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("Signed public release could not be verified");
+  });
+
+  test("服务未托管时显示手动更新，不提供安装按钮", async ({ page }) => {
+    await installDesktopMock(page, { updateScenario: "unsupported" });
+    const dialog = await openUpdatesPanel(page);
+    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
+    await expect(server).toContainText("手动更新");
+    await expect(server).toContainText("GitHub stable 最新 v0.0.2");
+    await expect(dialog.getByRole("button", { name: /安装 v/ })).toHaveCount(0);
+  });
+
+  test("更新事务失败时提示已回滚", async ({ page }) => {
+    await installDesktopMock(page, { updateScenario: "failed" });
+    const dialog = await openUpdatesPanel(page);
+    await expect(dialog.getByRole("alert")).toContainText("PiHub Server 更新失败（invalid_manifest）");
+  });
+
+  test("组件版本面板展示设备已安装版本", async ({ page }) => {
+    await installDesktopMock(page, { updateScenario: "none" });
     const dialog = await openUpdatesPanel(page);
     const components = dialog.locator(".extension-status-panel").filter({ hasText: "组件版本" });
-
-    await expect(components).toContainText("有组件与本地包不一致");
-    await expect(components).toContainText("Todo Rail");
-    await expect(components).toContainText("v0.2.0 → v0.2.3");
     await expect(components).toContainText("Pi Agent 运行时");
-
-    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
-    await server.getByRole("button", { name: "直传同步组件" }).click();
-    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible();
-    await expect(components).toContainText("与本地包一致");
-    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(1);
+    await expect(components).toContainText("Todo Rail");
+    await expect(components).toContainText("v0.2.3");
   });
 
-  test("Linux 目标需填写 SSH 用户名，root 需显式二次确认", async ({ page }) => {
-    await page.setViewportSize({ width: 1180, height: 800 });
-    await seedLocalReleaseDir(page, "/tmp/pihub-release");
-    await installDesktopMock(page, { serverOs: "linux" });
-    const dialog = await openUpdatesPanel(page);
-    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
-    await expect(server).toContainText("当前 v0.0.1 · 本地包 v0.0.2");
-    await server.getByRole("button", { name: "直传安装 v0.0.2" }).click();
-
-    const username = dialog.getByPlaceholder("Linux 用户名（例如 pi 或 ubuntu）");
-    await expect(username).toBeFocused();
-    await username.fill("root");
-    await dialog.getByRole("button", { name: "继续" }).click();
-    const confirm = page.getByRole("alertdialog", { name: /确认以 root 更新/ });
-    await expect(confirm).toBeVisible();
-    expect((await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer")).toHaveLength(0);
-    await confirm.getByRole("button", { name: "以 root 安装" }).click();
-
-    await expect(dialog.getByText("更新完成", { exact: true })).toBeVisible();
-    const bootstrapCalls = (await desktopCalls(page)).filter((call) => call.command === "bootstrap_tailnet_peer");
-    expect(bootstrapCalls).toHaveLength(1);
-    expect(bootstrapCalls[0].args).toMatchObject({ os: "linux", username: "root", autoPair: false, localArchiveDir: "/tmp/pihub-release" });
-  });
-
-  test("Windows 目标显示暂不支持直传更新", async ({ page }) => {
-    await seedLocalReleaseDir(page, "/tmp/pihub-release");
-    await installDesktopMock(page, { serverOs: "win32" });
-    const dialog = await openUpdatesPanel(page);
-    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
-    await expect(server).toContainText("Windows 目标暂不支持直传更新");
-    await expect(dialog.getByRole("button", { name: /直传安装/ })).toHaveCount(0);
-    expect((await desktopCalls(page)).filter((call) => call.command === "check_local_server_update")).toHaveLength(0);
-  });
-
-  test("未配置目录时提示先配置且不发起检测", async ({ page }) => {
-    await installDesktopMock(page);
-    const dialog = await openUpdatesPanel(page);
-    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
-    // 隐私门禁禁止内置开发者本机路径：未配置目录时必须停在不访问任何目录的空态
-    await expect(server).toContainText("未配置");
-    await expect(dialog.locator(".setup-plan").filter({ hasText: "未配置本地发布包目录" })).toBeVisible();
-    expect((await desktopCalls(page)).filter((call) => call.command === "check_local_server_update")).toHaveLength(0);
-  });
-
-  test("本地包已最新时显示已就绪", async ({ page }) => {
-    await seedLocalReleaseDir(page, "/tmp/pihub-release");
-    await installDesktopMock(page, { localUpdateScenario: "none" });
-    const dialog = await openUpdatesPanel(page);
-    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
-    await expect(server).toContainText("当前 v0.0.1 · 本地包 v0.0.1");
-    await expect(server).toContainText("已就绪");
-    await expect(dialog.getByRole("button", { name: /直传安装/ })).toHaveCount(0);
-  });
-
-  test("本地目录没有匹配包时显示错误并可重新检查", async ({ page }) => {
-    await seedLocalReleaseDir(page, "/tmp/pihub-release");
-    await installDesktopMock(page, { localUpdateScenario: "missing" });
-    const dialog = await openUpdatesPanel(page);
-    await expect(dialog.getByRole("alert")).toContainText("没有匹配 darwin 平台的发布包");
-    const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
-    await server.getByRole("button", { name: "重新检查" }).click();
-    await expect(dialog.getByRole("alert")).toContainText("没有匹配 darwin 平台的发布包");
-    expect((await desktopCalls(page)).filter((call) => call.args?.path === "/api/pihub/updates")).toHaveLength(0);
-  });
-
-  test("暂不支持直传的最小窗口无溢出且通过 axe", async ({ page }) => {
+  test("GitHub 流程的最小窗口无溢出且通过 axe", async ({ page }) => {
     await page.setViewportSize({ width: 720, height: 620 });
-    await seedLocalReleaseDir(page, "/tmp/pihub-release");
-    await installDesktopMock(page, { serverOs: "win32" });
+    await installDesktopMock(page, { updateScenario: "available" });
     const dialog = await openUpdatesPanel(page);
-    await expect(dialog.locator(".setup-row").filter({ hasText: "PiHub Server" })).toContainText("暂不支持直传更新");
+    await expect(dialog.locator(".setup-row").filter({ hasText: "PiHub Server" })).toContainText("GitHub stable 最新 v0.0.2");
     const bounds = await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
       return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth };

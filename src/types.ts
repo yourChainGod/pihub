@@ -451,7 +451,7 @@ export interface RemoteComponents {
   pi: {
     current: string | null;
     available: boolean;
-    binary: string;
+    binary: string | null;
   };
   extensions: {
     items: Array<{ name: string; version: string }>;

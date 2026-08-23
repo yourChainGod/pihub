@@ -3,9 +3,8 @@ import { Check, CircleAlert, CircleArrowUp, LoaderCircle, PackageCheck, RefreshC
 import { PiHubProviderIcon, PiHubServeIcon, PiHubSshIcon, PiHubTailnetIcon } from "./PiHubIcons";
 import { ConfirmDialog, useDialogFocus } from "./dialogs";
 import { desktopUpdateStatus } from "./desktopUpdater";
-import { applyRemoteComponentUpdate, bootstrapTailnetPeer, BusyUpdateError, checkLocalServerUpdate, DEFAULT_BOOTSTRAP_EXTENSIONS, loadRemoteComponents, loadRemoteRunning, loadRemoteSetup, localReleaseDirectory, onBootstrapLog, openTailscaleApproval, runRemoteSetup, scrubBootstrapSecrets } from "./lib";
-import type { LocalServerUpdate } from "./lib";
-import type { Device, RemoteComponents, RemoteSetupStatus } from "./types";
+import { applyRemoteComponentUpdate, applyRemoteServerUpdate, BusyUpdateError, loadRemoteComponents, loadRemoteSetup, loadRemoteUpdates, openTailscaleApproval, runRemoteSetup } from "./lib";
+import type { Device, RemoteComponents, RemoteSetupStatus, RemoteUpdates } from "./types";
 
 type SetupAction = "tailscale-serve" | "tailscale-ssh-enable" | "provider-install";
 
@@ -75,16 +74,12 @@ function DesktopUpdateRow() {
 function UpdatesPanel({ device, onServerUpdated }: { device: Device; onServerUpdated: () => void }) {
   const [setup, setSetup] = useState<RemoteSetupStatus | null>(null);
   const [components, setComponents] = useState<RemoteComponents | null>(null);
-  const [result, setResult] = useState<LocalServerUpdate | null>(null);
+  const [updates, setUpdates] = useState<RemoteUpdates | null>(null);
+  const [updatesError, setUpdatesError] = useState("");
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [installedNote, setInstalledNote] = useState("");
-  const [logLines, setLogLines] = useState<Array<{ line: string; stream: string }>>([]);
-  const [userPrompt, setUserPrompt] = useState(false);
-  const [sshUser, setSshUser] = useState("");
-  const [rootConfirm, setRootConfirm] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
   const [restartConfirm, setRestartConfirm] = useState(0);
   // Pi / Extensions update state
   const [piUpdating, setPiUpdating] = useState(false);
@@ -95,87 +90,64 @@ function UpdatesPanel({ device, onServerUpdated }: { device: Device; onServerUpd
   const [extUpdateError, setExtUpdateError] = useState("");
   const [piForceConfirm, setPiForceConfirm] = useState(false);
   const [extForceConfirm, setExtForceConfirm] = useState(false);
-  const logRef = useRef<HTMLPreElement>(null);
   const installButtonRef = useRef<HTMLButtonElement>(null);
 
-  const releaseDir = localReleaseDirectory().trim();
-  const platformOs = setup?.platform?.os ?? "";
-  const windows = platformOs === "win32";
-  const currentVersion = setup?.server?.version ?? null;
-
-  const installedPackages = setup?.defaultExtensions?.packages ?? [];
-  const componentRows = result ? [
-    { key: "pi", label: "Pi Agent 运行时", installed: setup?.pi?.version, bundled: result.pi.version },
-    ...result.extensions.map((extension) => {
-      const entry = installedPackages.find((item) => item.name === extension.name);
-      const installed = entry
-        ? (entry.installedVersion !== undefined ? entry.installedVersion : entry.installed ? entry.version : null)
-        : null;
-      return { key: `ext:${extension.name}`, label: extensionLabel(extension.name), installed, bundled: extension.version };
-    }),
-  ] : [];
-  const componentMismatch = componentRows.some((row) => row.installed !== undefined && row.installed !== row.bundled);
-  const updateAvailable = Boolean(result && (result.updateAvailable || componentMismatch));
-
-  useEffect(() => {
-    let disposed = false; let unlisten: (() => void) | undefined;
-    void onBootstrapLog((line, stream) => { if (!disposed && !line.trimStart().startsWith("PIHUB_PAIRING_CODE=")) setLogLines((current) => [...current.slice(-600), { line, stream }]); })
-      .then((fn) => { if (disposed) fn(); else unlisten = fn; });
-    return () => { disposed = true; unlisten?.(); };
-  }, []);
-  useEffect(() => { const el = logRef.current; if (el) el.scrollTop = el.scrollHeight; }, [logLines]);
+  const updateState = updates?.update ?? null;
+  const applyingPhase = updateState && ["recovering", "queued", "applying", "restarting"].includes(updateState.phase) ? updateState.phase : null;
 
   const check = useCallback(async () => {
     setChecking(true); setError("");
     try {
-      const [status, comps] = await Promise.all([
+      const [status, comps, remote] = await Promise.all([
         loadRemoteSetup(device),
         loadRemoteComponents(device).catch(() => null),
+        loadRemoteUpdates(device).catch((cause: unknown) => {
+          setUpdatesError(cause instanceof Error ? cause.message : String(cause));
+          return null;
+        }),
       ]);
       setSetup(status);
       setComponents(comps);
-      const os = status.platform?.os ?? "";
-      if (os === "win32" || !releaseDir) { setResult(null); return; }
-      setResult(await checkLocalServerUpdate(releaseDir, os, status.server?.version ?? null));
+      if (remote) { setUpdates(remote); setUpdatesError(""); } else { setUpdates(null); }
     } catch (cause) {
-      setResult(null);
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setChecking(false);
       setCheckedAt(Date.now());
     }
-  }, [device, releaseDir]);
+  }, [device]);
   useEffect(() => { void check(); }, [check]);
 
-  async function startInstall(username?: string) {
-    const target = result;
-    if (!target || installing) return;
-    setUserPrompt(false); setSshUser("");
-    setInstalling(true); setError(""); setInstalledNote(""); setLogLines([]);
+  // Poll while the supervisor works through an update transaction.
+  useEffect(() => {
+    if (!applyingPhase) return;
+    const timer = setInterval(() => { void check(); }, 3000);
+    return () => clearInterval(timer);
+  }, [applyingPhase, check]);
+
+  useEffect(() => {
+    if (updates?.update?.phase === "succeeded") onServerUpdated();
+  }, [updates?.update?.phase, onServerUpdated]);
+
+  async function doApply(force: boolean) {
+    setApplying(true); setError("");
     try {
-      const extensionNames = DEFAULT_BOOTSTRAP_EXTENSIONS.map((entry) => entry.name);
-      const outcome = await bootstrapTailnetPeer(device.ip || device.host, platformOs, username, true, extensionNames, { localArchiveDir: releaseDir, autoPair: false });
-      const output = scrubBootstrapSecrets(outcome.output);
-      setInstalledNote(output.includes("PIHUB_BOOTSTRAP_OK") ? `已直传安装 ${versionLabel(target.latest)}，PiHub Server 已更新并重启。` : output);
-      onServerUpdated();
+      await applyRemoteServerUpdate(device, force);
       await check();
     } catch (cause) {
-      const text = scrubBootstrapSecrets(cause instanceof Error ? cause.message : String(cause));
-      const tail = text.split("\n").map((line) => line.trim()).filter(Boolean).pop() || "未知错误";
-      setError(`直传安装失败 — ${tail.slice(0, 200)}`);
-    } finally { setInstalling(false); }
-  }
-
-  function proceedInstall() {
-    if (platformOs === "linux") { setUserPrompt(true); return; }
-    void startInstall();
+      if (cause instanceof BusyUpdateError) { setRestartConfirm(Math.max(1, updates?.running.length ?? 1)); return; }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setApplying(false); }
   }
 
   async function requestInstall() {
-    if (!updateAvailable || installing) return;
-    const running = await loadRemoteRunning(device).catch(() => [] as string[]);
+    if (!updates?.server.updateAvailable || applying) return;
+    // Re-check running sessions at click time; the loaded snapshot may be stale.
+    const fresh = await loadRemoteUpdates(device).catch(() => null);
+    if (fresh) setUpdates(fresh);
+    const running = fresh?.running ?? updates.running;
     if (running.length > 0) { setRestartConfirm(running.length); return; }
-    proceedInstall();
+    await doApply(false);
   }
 
   // ── Pi Agent update ────────────────────────────────────────────────────────
@@ -210,26 +182,34 @@ function UpdatesPanel({ device, onServerUpdated }: { device: Device; onServerUpd
   const piAvailable = components?.pi?.available ?? Boolean(piVersion);
   const extCount = components?.extensions?.count ?? 0;
 
-  const description = windows
-    ? `当前 ${versionLabel(currentVersion)} · Windows 目标暂不支持直传更新`
-    : !releaseDir
-      ? `当前 ${versionLabel(currentVersion)} · 未配置本地发布包目录`
-      : result
-        ? `当前 ${versionLabel(currentVersion)} · 本地包 ${versionLabel(result.latest)}`
-        : error
-          ? `当前 ${versionLabel(currentVersion)} · 本地包检查失败`
-          : `当前 ${versionLabel(currentVersion)} · 正在检查本地发布包…`;
+  const currentVersion = updates?.server.current ?? setup?.server?.version ?? null;
+  const latestVersion = updates?.server.latest ?? null;
+  const updateAvailable = Boolean(updates?.server.updateAvailable);
+  const installSupported = updates?.installSupported === true;
+  const description = updates
+    ? `当前 ${versionLabel(currentVersion)} · GitHub stable 最新 ${versionLabel(latestVersion)}`
+    : updatesError
+      ? `当前 ${versionLabel(currentVersion)} · GitHub 更新检查失败`
+      : `当前 ${versionLabel(currentVersion)} · 正在检查 GitHub 更新…`;
+
+  const componentRows = components ? [
+    { key: "pi", label: "Pi Agent 运行时", installed: piVersion },
+    ...components.extensions.items.map((extension) => ({ key: `ext:${extension.name}`, label: extensionLabel(extension.name), installed: extension.version as string | null })),
+  ] : [];
+
   return <div className="setup-content">
     <DesktopUpdateRow />
-    {windows
-      ? <ReadOnlySetupRow icon={<PiHubServeIcon />} title="PiHub Server" description={description} ok={false} label="暂不支持" />
-      : !releaseDir
-        ? <ReadOnlySetupRow icon={<PiHubServeIcon />} title="PiHub Server" description={description} ok={false} label="未配置目录" />
-        : <SetupRow icon={<PiHubServeIcon />} title="PiHub Server" description={description} ok={Boolean(result && !updateAvailable)} action={result ? (result.updateAvailable ? `直传安装 ${versionLabel(result.latest)}` : componentMismatch ? "直传同步组件" : "已是最新") : error ? "重新检查" : "正在检查…"} busy={checking || installing} buttonRef={installButtonRef} onClick={() => (updateAvailable ? void requestInstall() : void check())} />}
+    {updates && updateAvailable && !installSupported
+      ? <ReadOnlySetupRow icon={<PiHubServeIcon />} title="PiHub Server" description={`${description} · 服务未由更新 supervisor 托管，无法自动安装`} ok={false} label="手动更新" />
+      : <SetupRow icon={<PiHubServeIcon />} title="PiHub Server" description={description} ok={Boolean(updates && !updateAvailable)} action={updates ? (updateAvailable ? `安装 ${versionLabel(latestVersion)}` : "已是最新") : updatesError ? "重新检查" : "正在检查…"} busy={checking || applying || Boolean(applyingPhase)} buttonRef={installButtonRef} onClick={() => (updates && updateAvailable ? void requestInstall() : void check())} />}
+    {applyingPhase && <div className="update-phase applying" role="status" aria-live="polite"><LoaderCircle className="spin" size={17} /><div><strong>正在更新 PiHub Server</strong><span>服务端正在从 GitHub 下载签名发布包并执行候选健康检查，连接可能短暂中断。</span></div></div>}
+    {updateState?.phase === "succeeded" && <div className="update-phase succeeded" role="status"><Check size={17} /><div><strong>更新完成</strong><span>PiHub Server 已更新到 {versionLabel(updateState.resultVersion ?? updateState.targetVersion)} 并重启。</span></div></div>}
+    {updateState?.phase === "failed" && <div className="setup-error" role="alert">PiHub Server 更新失败{updateState.errorCode ? `（${updateState.errorCode}）` : ""}，服务已回滚到当前版本。</div>}
+    {updatesError && !updates && <div className="setup-error" role="alert">{updatesError}</div>}
     <SetupRow
       icon={<PackageCheck size={17} />}
       title="Pi Agent"
-      description={piAvailable ? `当前 ${versionLabel(piVersion)} · 独立进程模式` : "未检测到系统 Pi Agent"}
+      description={piAvailable ? `当前 ${versionLabel(piVersion)} · 独立进程模式` : "未检测到 Pi Agent"}
       ok={piAvailable}
       action={piAvailable ? "更新 Pi" : "未安装"}
       busy={piUpdating}
@@ -250,19 +230,10 @@ function UpdatesPanel({ device, onServerUpdated }: { device: Device; onServerUpd
     />
     {extUpdateNote && <div className="update-phase succeeded" role="status"><Check size={17} /><div><strong>插件</strong><span>{extUpdateNote}</span></div></div>}
     {extUpdateError && <div className="setup-error" role="alert">{extUpdateError}</div>}
-    {componentRows.length > 0 && <div className="extension-status-panel"><div className="extension-status-head"><strong>组件版本</strong><span>{componentMismatch ? "有组件与本地包不一致" : "与本地包一致"}</span></div><div className="extension-status-list">{componentRows.map((row) => {
-      const state = row.installed === undefined ? "unknown" : row.installed === row.bundled ? "current" : "outdated";
-      return <div className="extension-status-item" key={row.key}><span>{row.label}</span><em className={state === "current" ? "ok" : "off"}>{state === "unknown" ? `包内 ${versionLabel(row.bundled)}` : state === "current" ? versionLabel(row.installed) : `${versionLabel(row.installed)} → ${versionLabel(row.bundled)}`}</em></div>;
-    })}</div></div>}
-    {!windows && !releaseDir && <div className="setup-plan"><strong>未配置本地发布包目录</strong><span>在「连接设置」中填写 build-server-release.mjs 的产出目录后，即可在此检测并直传更新，全程不访问 GitHub。</span></div>}
-    {installedNote && <div className="update-phase succeeded" role="status"><Check size={17} /><div><strong>更新完成</strong><span>{installedNote}</span></div></div>}
-    {installing && <div className="update-phase applying" role="status" aria-live="polite"><LoaderCircle className="spin" size={17} /><div><strong>正在直传安装</strong><span>正在通过 Tailscale SSH 上传本地发布包并重启 PiHub Server，连接可能短暂中断。</span></div></div>}
+    {componentRows.length > 0 && <div className="extension-status-panel"><div className="extension-status-head"><strong>组件版本</strong><span>设备安装版本</span></div><div className="extension-status-list">{componentRows.map((row) => <div className="extension-status-item" key={row.key}><span>{row.label}</span><em className={row.installed ? "ok" : "off"}>{versionLabel(row.installed)}</em></div>)}</div></div>}
     {error && <div className="setup-error" role="alert">{error}</div>}
-    {logLines.length > 0 && <pre className="bootstrap-log" ref={logRef}>{logLines.map((entry, index) => <span key={index} className={entry.stream === "stderr" ? "err" : undefined}>{entry.line}{"\n"}</span>)}</pre>}
-    <footer className="updates-footer"><span>{checkedAt ? `上次检查 ${new Date(checkedAt).toLocaleTimeString("zh-CN")}` : "尚未检查"}</span><button onClick={() => void check()} disabled={checking || installing}><RefreshCw className={checking ? "spin" : ""} size={13} />重新检查</button></footer>
-    {userPrompt && <form className="windows-ssh-form" onSubmit={(event) => { event.preventDefault(); const name = sshUser.trim(); if (!name) return; if (name.toLowerCase() === "root") { setRootConfirm(name); return; } void startInstall(name); }}><div><strong>直传更新 {device.name}</strong><span>建议使用普通用户（例如 pi 或 ubuntu）；以 root 安装会跳过用户权限隔离，需二次确认。</span></div><input value={sshUser} onChange={(event) => setSshUser(event.target.value)} placeholder="Linux 用户名（例如 pi 或 ubuntu）" autoFocus /><button type="button" onClick={() => { setUserPrompt(false); setSshUser(""); }}>取消</button><button type="submit" disabled={!sshUser.trim()}>继续</button></form>}
-    {rootConfirm && <ConfirmDialog title={`确认以 root 更新 ${device.name}？`} message="PiHub Server 将以 root 运行：文件、会话和 Provider 凭据都在 root 家目录，用户权限隔离失效。仅当这台机器确实只有 root 可用时才继续。" confirmLabel="以 root 安装" danger onConfirm={() => { const name = rootConfirm; setRootConfirm(null); void startInstall(name); }} onClose={() => setRootConfirm(null)} />}
-    {restartConfirm > 0 && <ConfirmDialog title="有会话正在运行 — 强制更新" message={`当前 ${restartConfirm} 个会话仍在运行。强制更新会立即中断这些会话并重启 PiHub Server。`} confirmLabel="强制更新" danger returnFocus={installButtonRef.current} onConfirm={() => { setRestartConfirm(0); proceedInstall(); }} onClose={() => setRestartConfirm(0)} />}
+    <footer className="updates-footer"><span>{checkedAt ? `上次检查 ${new Date(checkedAt).toLocaleTimeString("zh-CN")}` : "尚未检查"}</span><button onClick={() => void check()} disabled={checking || applying}><RefreshCw className={checking ? "spin" : ""} size={13} />重新检查</button></footer>
+    {restartConfirm > 0 && <ConfirmDialog title="有会话正在运行 — 强制更新" message={`当前 ${restartConfirm} 个会话仍在运行。强制更新会立即中断这些会话并重启 PiHub Server。`} confirmLabel="强制更新" danger returnFocus={installButtonRef.current} onConfirm={() => { setRestartConfirm(0); void doApply(true); }} onClose={() => setRestartConfirm(0)} />}
     {piForceConfirm && <ConfirmDialog title="有会话正在运行 — 强制更新 Pi Agent" message="当前有会话正在运行。强制更新 Pi Agent 会中断这些会话。" confirmLabel="强制更新 Pi" danger onConfirm={() => { setPiForceConfirm(false); void doUpdatePi(true); }} onClose={() => setPiForceConfirm(false)} />}
     {extForceConfirm && <ConfirmDialog title="有会话正在运行 — 强制更新插件" message="当前有会话正在运行。强制更新插件会中断这些会话。" confirmLabel="强制更新插件" danger onConfirm={() => { setExtForceConfirm(false); void doUpdateExtensions(true); }} onClose={() => setExtForceConfirm(false)} />}
   </div>;
