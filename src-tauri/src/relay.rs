@@ -27,6 +27,8 @@ pub(crate) const RELAY_URL: &str = "wss://relay.ffuu.eu.org";
 const RELAY_PROTOCOL_VERSION: u32 = 1;
 /// server/lib/relay-protocol.ts RELAY_XFER_CHUNK.
 const XFER_CHUNK: usize = 1024 * 1024;
+/// server/lib/relay-protocol.ts RELAY_INLINE_LIMIT.
+const INLINE_LIMIT: usize = 768 * 1024;
 /// server/lib/relay-protocol.ts RELAY_XFER_IDLE_TIMEOUT_MS.
 const XFER_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -145,8 +147,7 @@ fn request_subject(node_id: &str) -> String {
 
 /// Binary frame encoder (8-byte big-endian header + payload), kept in
 /// lockstep with encodeFrame in server/lib/relay-protocol.ts.
-#[cfg(test)]
-fn encode_frame_for_test(sequence: u32, payload: &[u8]) -> Vec<u8> {
+fn encode_frame(sequence: u32, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(8 + payload.len());
     frame.extend_from_slice(&sequence.to_be_bytes());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -307,9 +308,14 @@ async fn relay_round_trip(
     node_id: &str,
     envelope: Vec<u8>,
     timeout: Duration,
+    channel: Channel,
 ) -> Result<Bytes, String> {
     let subject = request_subject(node_id);
-    let request = client.control.request(subject, Bytes::from(envelope));
+    let connection = match channel {
+        Channel::Control => &client.control,
+        Channel::Bulk => &client.bulk,
+    };
+    let request = connection.request(subject, Bytes::from(envelope));
     let message = match tokio::time::timeout(timeout, request).await {
         Ok(Ok(message)) => message,
         Ok(Err(error)) => {
@@ -546,6 +552,46 @@ pub(crate) async fn send_relay_authenticated(
     }
 }
 
+#[derive(Clone, Copy)]
+enum Channel {
+    Control,
+    Bulk,
+}
+
+/// Publish a request body as a chunked outbound transfer on the bulk
+/// connection, then send the envelope referencing it on the same connection so
+/// per-connection ordering guarantees the connector sees open+frames before
+/// the request. Mirrors the connector's inbound xfer reader.
+async fn send_body_xfer(
+    client: &RelayClient,
+    node_id: &str,
+    xfer_id: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    let subject = format!("node.{node_id}.xfer.{xfer_id}");
+    let open = serde_json::to_vec(&serde_json::json!({
+        "v": RELAY_PROTOCOL_VERSION,
+        "kind": "xfer-open",
+        "xferId": xfer_id,
+        "size": body.len(),
+        "sha256": hex::encode(Sha256::digest(body)),
+    }))
+    .expect("xfer-open is serializable");
+    client.bulk.publish(subject.clone(), Bytes::from(open)).await
+        .map_err(|error| format!("无法发送传输头：{error}"))?;
+    for (sequence, chunk) in body.chunks(XFER_CHUNK).enumerate() {
+        client.bulk.publish(subject.clone(), Bytes::from(encode_frame(sequence as u32, chunk))).await
+            .map_err(|error| format!("无法发送传输分块：{error}"))?;
+    }
+    let close = serde_json::to_vec(&serde_json::json!({
+        "v": RELAY_PROTOCOL_VERSION, "kind": "xfer-close", "xferId": xfer_id, "ok": true,
+    }))
+    .expect("xfer-close is serializable");
+    client.bulk.publish(subject, Bytes::from(close)).await
+        .map_err(|error| format!("无法发送传输尾帧：{error}"))?;
+    Ok(())
+}
+
 async fn send_relay_envelope(
     client: &RelayClient,
     node_id: &str,
@@ -555,9 +601,34 @@ async fn send_relay_envelope(
 ) -> Result<RelayResponse, String> {
     let (method, path, body) = relay_request_parts(spec)?;
     let id = new_relay_id();
-    let envelope = encode_request_envelope(&id, &method, &path, &headers, body.as_ref());
+    // Bodies above the inline limit travel as a chunked xfer on the bulk
+    // connection; the request envelope references the transfer instead.
+    let (envelope, channel) = match body.as_ref().filter(|body| body.len() > INLINE_LIMIT) {
+        Some(large) => {
+            let xfer_id = new_relay_id();
+            send_body_xfer(client, node_id, &xfer_id, large).await?;
+            let mut envelope = serde_json::Map::new();
+            envelope.insert("v".into(), RELAY_PROTOCOL_VERSION.into());
+            envelope.insert("kind".into(), "req".into());
+            envelope.insert("id".into(), id.clone().into());
+            envelope.insert("method".into(), method.into());
+            envelope.insert("path".into(), path.into());
+            let header_map: serde_json::Map<String, serde_json::Value> = headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone().into()))
+                .collect();
+            envelope.insert("headers".into(), header_map.into());
+            envelope.insert("xfer".into(), xfer_id.into());
+            (
+                serde_json::to_vec(&serde_json::Value::Object(envelope))
+                    .expect("relay envelope is serializable"),
+                Channel::Bulk,
+            )
+        }
+        None => (encode_request_envelope(&id, &method, &path, &headers, body.as_ref()), Channel::Control),
+    };
     let timeout = spec.timeout_budget().unwrap_or(DEFAULT_REQUEST_TIMEOUT);
-    let reply = relay_round_trip(client, node_id, envelope, timeout).await?;
+    let reply = relay_round_trip(client, node_id, envelope, timeout, channel).await?;
     let (status, inline_body, xfer) = parse_response_envelope(&reply, &id)?;
     let body = match xfer {
         Some(xfer_id) => receive_xfer(client, &xfer_id, max_bytes).await?,
@@ -656,7 +727,7 @@ mod tests {
 
     #[test]
     fn frame_encoding_matches_the_shared_vector() {
-        let frame = crate::relay::encode_frame_for_test(7, b"pihub");
+        let frame = encode_frame(7, b"pihub");
         assert_eq!(
             hex::encode(&frame),
             "00000007000000057069687562"

@@ -14,8 +14,9 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 use crate::transport::{
-    response_bytes_limited_named, send_authenticated, validate_tailnet_url, validated_api_endpoint,
-    ApiAccess, AuthenticatedRequestSpec, MAX_AUTH_RESPONSE_BYTES,
+    resolve_device_transport, response_bytes_limited_named, send_authenticated,
+    validate_tailnet_url, validated_api_endpoint, ApiAccess, AuthenticatedRequestSpec,
+    DeviceTransport, MAX_AUTH_RESPONSE_BYTES,
 };
 use crate::util::base64_decode;
 
@@ -48,9 +49,22 @@ pub(crate) async fn export_session_html(
     )?;
     let spec =
         AuthenticatedRequestSpec::empty(reqwest::Method::GET, endpoint, Duration::from_secs(60));
-    let response = send_authenticated(&base, &spec).await?;
-    let (status, html) =
-        response_bytes_limited_named(response, MAX_SESSION_EXPORT_BYTES, "会话导出响应").await?;
+    let (status, html) = match resolve_device_transport(&base) {
+        DeviceTransport::Tailnet => {
+            let response = send_authenticated(&base, &spec).await?;
+            response_bytes_limited_named(response, MAX_SESSION_EXPORT_BYTES, "会话导出响应").await?
+        }
+        DeviceTransport::Relay { .. } => {
+            let response =
+                crate::relay::send_relay_authenticated(&base, &spec, MAX_SESSION_EXPORT_BYTES)
+                    .await?;
+            (
+                reqwest::StatusCode::from_u16(response.status)
+                    .map_err(|_| "Relay 响应状态码无效".to_owned())?,
+                response.body.to_vec(),
+            )
+        }
+    };
     if !status.is_success() {
         return Err(format!("导出失败：HTTP {status}"));
     }
@@ -179,6 +193,32 @@ pub(crate) async fn download_remote_file(
     let endpoint = validated_api_endpoint(&base, &path, ApiAccess::FileDownload)?;
     let spec =
         AuthenticatedRequestSpec::empty(reqwest::Method::GET, endpoint, Duration::from_secs(300));
+    if matches!(resolve_device_transport(&base), DeviceTransport::Relay { .. }) {
+        // The relay transfer reassembles the full body in memory (bounded by
+        // MAX_REMOTE_DOWNLOAD_BYTES) after sha256 verification.
+        let response =
+            crate::relay::send_relay_authenticated(&base, &spec, MAX_REMOTE_DOWNLOAD_BYTES)
+                .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(format!("下载失败：HTTP {}", response.status));
+        }
+        let (path, mut file) = reserve_download_path(&app, &name)?;
+        let write_result: Result<(), String> = (|| {
+            file.write_all(&response.body)
+                .map_err(|error| format!("无法写入下载文件：{error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("无法完成下载文件：{error}"))?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            drop(file);
+            remove_partial_download(&path);
+            return Err(error);
+        }
+        return Ok(ExportResult {
+            path: path.to_string_lossy().into_owned(),
+        });
+    }
     let mut response = send_authenticated(&base, &spec).await?;
     let status = response.status();
     if !status.is_success() {
@@ -310,9 +350,24 @@ async fn send_upload_body(
         format!("multipart/form-data; boundary={boundary}"),
         Duration::from_secs(300),
     );
-    let response = send_authenticated(base, &spec).await?;
-    let (status, bytes) =
-        response_bytes_limited_named(response, MAX_AUTH_RESPONSE_BYTES, "文件上传响应").await?;
+    let (status, bytes) = match resolve_device_transport(base) {
+        DeviceTransport::Tailnet => {
+            let response = send_authenticated(base, &spec).await?;
+            response_bytes_limited_named(response, MAX_AUTH_RESPONSE_BYTES, "文件上传响应").await?
+        }
+        DeviceTransport::Relay { .. } => {
+            // Large multipart bodies ride the chunked xfer channel; the digest
+            // in the signed header still covers the exact reassembled bytes.
+            let response =
+                crate::relay::send_relay_authenticated(base, &spec, MAX_AUTH_RESPONSE_BYTES)
+                    .await?;
+            (
+                reqwest::StatusCode::from_u16(response.status)
+                    .map_err(|_| "Relay 响应状态码无效".to_owned())?,
+                response.body.to_vec(),
+            )
+        }
+    };
     let value = if bytes.is_empty() {
         Value::Null
     } else {
