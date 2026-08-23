@@ -51,7 +51,8 @@ export interface NatsLikeMessage {
   reply?: string;
 }
 export interface NatsLikeConnection {
-  subscribe(subject: string, options: { callback(message: NatsLikeMessage): void }): NatsLikeSubscription;
+  // nats.js delivers (error, message); error is null on normal delivery.
+  subscribe(subject: string, options: { callback(error: Error | null, message: NatsLikeMessage): void }): NatsLikeSubscription;
   publish(subject: string, data: Uint8Array, options?: { reply?: string }): void;
   status(): AsyncIterable<{ type: string }>;
   close(): Promise<void>;
@@ -427,11 +428,20 @@ export async function createConnector(options: ConnectorOptions): Promise<Runnin
   }
 
   const prefix = `node.${config.nodeId}.`;
+  // nats.js subscription callbacks receive (error, message).
+  const onlyMessage = (handler: (message: NatsLikeMessage) => void) =>
+    (error: Error | null, message: NatsLikeMessage) => {
+      if (error) {
+        logger.warn(`connector: relay 投递错误（${error.message}）`);
+        return;
+      }
+      handler(message);
+    };
   const subscriptions = [
-    connection.subscribe(requestSubject(config.nodeId), { callback: (message) => void handleRequest(message) }),
-    connection.subscribe(streamOpenSubject(config.nodeId), { callback: (message) => void handleStreamOpen(message) }),
-    connection.subscribe(streamCloseSubject(config.nodeId), { callback: handleStreamClose }),
-    connection.subscribe(`${prefix}xfer.>`, { callback: handleXferMessage }),
+    connection.subscribe(requestSubject(config.nodeId), { callback: onlyMessage((message) => void handleRequest(message)) }),
+    connection.subscribe(streamOpenSubject(config.nodeId), { callback: onlyMessage((message) => void handleStreamOpen(message)) }),
+    connection.subscribe(streamCloseSubject(config.nodeId), { callback: onlyMessage(handleStreamClose) }),
+    connection.subscribe(`${prefix}xfer.>`, { callback: onlyMessage(handleXferMessage) }),
   ];
 
   // A relay disconnect invalidates every local stream; the desktop reopens

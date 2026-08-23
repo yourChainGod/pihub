@@ -212,6 +212,7 @@ class StableServerSupervisor {
     // Optional: when this probe returns true, the relay connector is spawned
     // alongside every (non-candidate) server child from the same package root.
     this.connectorConfigured = options.connectorConfigured || (() => false);
+    this.connectorDataRoot = options.connectorDataRoot || "";
     this.parentProcess = options.parentProcess || process;
     this.logger = options.logger || console;
     this.stdoutLogSink = options.stdoutLogSink || null;
@@ -448,10 +449,12 @@ class StableServerSupervisor {
     this.stopConnector();
     const entry = path.join(packageRoot, "bin", "pihub-connector.js");
     if (!this.connectorConfigured() || !fs.existsSync(entry)) return;
+    const env = this.childEnvironment(packageRoot, version);
+    if (this.connectorDataRoot) env.PIHUB_CONNECTOR_DATA_ROOT = this.connectorDataRoot;
     const child = this.spawnImpl(process.execPath, [entry], {
       cwd: packageRoot,
       stdio: ["ignore", "pipe", "pipe"],
-      env: this.childEnvironment(packageRoot, version),
+      env,
       windowsHide: true,
     });
     if (!child || typeof child.once !== "function") throw new Error("Could not start the PiHub relay connector");

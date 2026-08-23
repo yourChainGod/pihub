@@ -126,6 +126,7 @@ async function main() {
           return false;
         }
       },
+      connectorDataRoot: dataRoot,
       ...logSinks,
       logger: createSupervisorLogger(logSinks.stderrLogSink),
       runtimeFactory: ({ health }) => new ProductionServerUpdateRuntime({

@@ -20,9 +20,11 @@ if (!isNodeVersionSupported(process.versions.node)) {
 
 async function main() {
   const jiti = createJiti(__filename, { interopDefault: true });
-  const { getServerUpdateDataRoot } = await jiti.import("../lib/server-update-runtime.ts");
   const { loadConnectorConfig, createConnector } = await jiti.import("../lib/connector.ts");
-  const dataRoot = getServerUpdateDataRoot({ platform: process.platform });
+  // The supervisor passes the data root explicitly; the expensive update
+  // runtime import is only the fallback for standalone runs.
+  const dataRoot = process.env.PIHUB_CONNECTOR_DATA_ROOT
+    ?? (await jiti.import("../lib/server-update-runtime.ts")).getServerUpdateDataRoot({ platform: process.platform });
   const config = loadConnectorConfig(dataRoot);
   if (!config) {
     console.log("pihub-connector: 未配置 state/connector.json，节点不接入 relay。");
