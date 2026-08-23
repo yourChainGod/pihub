@@ -50,7 +50,10 @@ test("session reads use the live SessionManager before requiring a JSONL path", 
     const pathLookup = source.indexOf("resolveSessionPath(id)");
     assert.ok(liveLookup >= 0);
     assert.ok(pathLookup > liveLookup);
-    assert.match(source, /liveRpc\?\.inner\.sessionManager \?\? openSessionManagerCached/);
+    // Worker-backed sessions expose a stub manager without getEntries; those
+    // must fall back to the persisted JSONL via openSessionManagerCached.
+    assert.match(source, /typeof \(liveManager as \{ getEntries\?: unknown \}\)\.getEntries === "function"/);
+    assert.match(source, /openSessionManagerCached\(/);
   }
 });
 

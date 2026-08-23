@@ -43,12 +43,16 @@ export async function GET(
   try {
     const rpc = getRpcSession(id, access.context.deviceId);
     const liveRpc = rpc?.isAlive() ? rpc : undefined;
-    const resolvedPath = liveRpc ? null : await resolveSessionPath(id);
-    if (!liveRpc && !resolvedPath) {
+    // Worker-backed (process-isolated) sessions expose only a stub session
+    // manager; read their JSONL instead — the worker appends it continuously.
+    const liveManager = liveRpc?.inner.sessionManager;
+    const useLive = Boolean(liveManager && typeof (liveManager as { getEntries?: unknown }).getEntries === "function");
+    const resolvedPath = useLive ? null : await resolveSessionPath(id);
+    if (!useLive && !resolvedPath) {
       return privateSessionJson({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = liveRpc?.inner.sessionManager ?? openSessionManagerCached(resolvedPath!);
+    const sm = useLive ? liveManager! : openSessionManagerCached(resolvedPath!);
     const filePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
     const entries = sm.getEntries();
     const leafId = sm.getLeafId();

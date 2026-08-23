@@ -17,12 +17,16 @@ export async function GET(
   try {
     const rpc = getRpcSession(id, access.context.deviceId);
     const liveRpc = rpc?.isAlive() ? rpc : undefined;
-    const filePath = liveRpc ? null : await resolveSessionPath(id);
-    if (!liveRpc && !filePath) {
+    // Worker-backed sessions expose only a stub session manager; read their
+    // JSONL instead — the worker appends it continuously.
+    const liveManager = liveRpc?.inner.sessionManager;
+    const useLive = Boolean(liveManager && typeof (liveManager as { getEntries?: unknown }).getEntries === "function");
+    const filePath = useLive ? null : await resolveSessionPath(id);
+    if (!useLive && !filePath) {
       return privateSessionJson({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = liveRpc?.inner.sessionManager ?? openSessionManagerCached(filePath!);
+    const sm = useLive ? liveManager! : openSessionManagerCached(filePath!);
     const fullContext = buildSessionContext(sm.getEntries() as never, leafId, {
       deferThinking,
       deferToolResultImages,

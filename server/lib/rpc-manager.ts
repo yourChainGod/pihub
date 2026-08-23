@@ -1843,6 +1843,28 @@ export function getRpcSessionInfos(ownerId?: string): SessionInfo[] {
     if (!session.isAlive() || (ownerId !== undefined && session.ownerId !== ownerId)) continue;
 
     const manager = session.inner.sessionManager;
+    // Process-isolated worker sessions expose only a stub session manager
+    // (getCwd/getBranch); the persisted list is authoritative for saved
+    // sessions, so the runtime entry only matters for a live unsaved one.
+    if (typeof (manager as { getEntries?: unknown }).getEntries !== "function") {
+      const workerFile = session.sessionFile || "";
+      const workerPersisted = Boolean(workerFile && existsSync(workerFile));
+      if (!workerPersisted && !session.isRunning()) continue;
+      const now = new Date().toISOString();
+      sessions.push({
+        path: workerFile,
+        id: session.sessionId,
+        cwd: session.cwd,
+        name: "",
+        created: now,
+        modified: now,
+        messageCount: 0,
+        firstMessage: "(no messages)",
+        transient: !workerPersisted,
+      });
+      continue;
+    }
+
     const header = manager.getHeader();
     const entries = manager.getEntries() as unknown as Array<
       { type: string; timestamp: string } | SessionMessageEntry
