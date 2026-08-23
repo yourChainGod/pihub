@@ -1,9 +1,9 @@
 name: Server Release
 
 # 服务端专用发布流水线（仓库已公开，标准 runner 免费；桌面端发布链已移除，
-# 只保留服务端：validate → 6 平台构建 → 签名 → draft）。
-# 注意：npm/rust audit 门禁不在这里——固定上游依赖的不可修复 CVE 会阻塞发布；
-# 审计走手动触发的 security.yml。
+# 只保留服务端：validate → 6 平台构建 → 签名 → draft）。这是仓库唯一的
+# Actions 工作流；质量门禁全部本地跑（scripts/release-preflight.mjs），
+# 依赖审计也在本地用 npm audit / privacy-scan 手动执行。
 
 on:
   push:
@@ -391,14 +391,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          set -x
           readonly tag="${PIHUB_RELEASE_TAG}"
           readonly commit="${PIHUB_RELEASE_COMMIT}"
           readonly expected_list="${RUNNER_TEMP}/expected-assets.txt"
           readonly current_list="${RUNNER_TEMP}/current-assets.txt"
           readonly missing_list="${RUNNER_TEMP}/missing-assets.txt"
 
-          remote_ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          # Name the failing call: earlier runs died on a bare "Resource not
+          # accessible by integration" with no indication which API call the
+          # job token was refused on.
+          api() {
+            local label="$1"; shift
+            if ! gh api "$@"; then
+              echo "Publish step failed at: ${label}" >&2
+              return 1
+            fi
+          }
+
+          # Probe the effective job-token permissions first so a token problem
+          # is visible before any mutation.
+          echo "Effective token permissions on ${GITHUB_REPOSITORY}:"
+          api "permissions probe" "repos/${GITHUB_REPOSITORY}" --jq '.permissions' || exit 1
+
+          remote_ref="$(api "read tag ref" "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")" || exit 1
           remote_object="$(jq -er '.object.sha' <<<"${remote_ref}")"
           remote_type="$(jq -er '.object.type' <<<"${remote_ref}")"
           [[ "${remote_object}" == "${PIHUB_RELEASE_TAG_OBJECT}" ]] || { echo "The release tag moved during publication" >&2; exit 1; }
@@ -406,13 +421,13 @@ jobs:
           while [[ "${remote_type}" == "tag" ]]; do
             ((peel_depth += 1))
             ((peel_depth <= 4)) || exit 1
-            remote_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
+            remote_tag="$(api "peel tag object" "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")" || exit 1
             remote_object="$(jq -er '.object.sha' <<<"${remote_tag}")"
             remote_type="$(jq -er '.object.type' <<<"${remote_tag}")"
           done
           [[ "${remote_type}" == "commit" && "${remote_object}" == "${commit}" ]] || { echo "The release commit moved during publication" >&2; exit 1; }
-          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${commit}...main" --jq '.status')"
-          [[ "${comparison}" == "ahead" || "${comparison}" == "identical" ]] || { echo "The release commit is no longer reachable from main" >&2; exit 1; }
+          comparison="$(api "compare with main" "repos/${GITHUB_REPOSITORY}/compare/${commit}...main" --jq '.status')" || exit 1
+          [[ "${comparison}" == "ahead" || "${comparison}" == "identical" ]] || { echo "The release commit is no longer reachable from main (status: ${comparison})" >&2; exit 1; }
 
           find server-artifacts -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort > "${expected_list}"
           if [[ ! -s "${expected_list}" ]]; then
@@ -420,29 +435,32 @@ jobs:
             exit 1
           fi
 
-          releases_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          releases_json="$(api "list releases" --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")" || exit 1
           matching_releases="$(jq -c --arg tag "${tag}" '[.[][] | select(.tag_name == $tag)]' <<<"${releases_json}")"
           release_count="$(jq -r 'length' <<<"${matching_releases}")"
           if [[ "${release_count}" == "1" ]]; then
             release_json="$(jq -c '.[0]' <<<"${matching_releases}")"
-            jq -e --arg tag "${tag}" --arg commit "${commit}" \
+            if ! jq -e --arg tag "${tag}" --arg commit "${commit}" \
               '.tag_name == $tag and .target_commitish == $commit and .draft == true and .prerelease == false' \
-              <<<"${release_json}" >/dev/null
+              <<<"${release_json}" >/dev/null; then
+              echo "An existing release for ${tag} is not the expected immutable draft (already published or wrong target); refusing to modify it" >&2
+              exit 1
+            fi
             release_id="$(jq -er '.id' <<<"${release_json}")"
-            gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
-              | jq -r '.[][].name' | LC_ALL=C sort > "${current_list}"
+            api "list draft assets" --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              | jq -r '.[][].name' | LC_ALL=C sort > "${current_list}" || exit 1
             if [[ -s "${current_list}" ]] && comm -23 "${current_list}" "${expected_list}" | grep -q .; then
               echo "Existing draft contains an unexpected asset; refusing to modify it" >&2
               exit 1
             fi
           elif [[ "${release_count}" == "0" ]]; then
-            release_json="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+            release_json="$(api "create draft release" --method POST "repos/${GITHUB_REPOSITORY}/releases" \
               -f tag_name="${tag}" \
               -f target_commitish="${commit}" \
               -f name="PiHub Server ${tag}" \
               -f body="Signed PiHub Server artifacts. Keep as draft until native install, update, and rollback verification pass." \
               -F draft=true \
-              -F prerelease=false)"
+              -F prerelease=false)" || exit 1
             release_id="$(jq -er '.id' <<<"${release_json}")"
             : > "${current_list}"
           else
@@ -454,16 +472,19 @@ jobs:
           while IFS= read -r asset; do
             [[ -n "${asset}" ]] || continue
             encoded_asset="$(jq -rn --arg value "${asset}" '$value | @uri')"
-            curl --fail-with-body --silent --show-error \
+            if ! curl --fail-with-body --silent --show-error \
               --request POST \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
               --header "Content-Type: application/octet-stream" \
               --data-binary "@server-artifacts/${asset}" \
-              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded_asset}" >/dev/null
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded_asset}" >/dev/null; then
+              echo "Publish step failed at: upload asset ${asset}" >&2
+              exit 1
+            fi
           done < "${missing_list}"
 
-          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
-            | jq -r '.[][].name' | LC_ALL=C sort > "${current_list}"
+          api "verify uploaded assets" --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            | jq -r '.[][].name' | LC_ALL=C sort > "${current_list}" || exit 1
           diff -u "${expected_list}" "${current_list}"

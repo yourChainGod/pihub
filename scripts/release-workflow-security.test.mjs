@@ -4,9 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "..");
-const ciPath = path.join(root, ".github", "workflows", "ci.yml");
 const releasePath = path.join(root, ".github", "workflows", "server-release.yml");
-const securityPath = path.join(root, ".github", "workflows", "security.yml");
 
 function jobBlock(source, name) {
   const marker = `  ${name}:\n`;
@@ -93,7 +91,6 @@ test("release secrets and token powers stay in protected least-privilege jobs", 
 });
 
 test("release workflow ships standalone Server archives with a signed manifest", () => {
-  const ci = fs.readFileSync(ciPath, "utf8");
   const release = fs.readFileSync(releasePath, "utf8");
   const retiredEmbeddedPatterns = [
     /server:pack/,
@@ -102,12 +99,9 @@ test("release workflow ships standalone Server archives with a signed manifest",
     /src-tauri\/resources\/pihub-server-/,
     /prepare-server-resource\.mjs/,
   ];
-  for (const source of [ci, release]) {
-    for (const pattern of retiredEmbeddedPatterns) assert.doesNotMatch(source, pattern);
-  }
-  // The native smoke runs in the release build job; CI stays on ubuntu only.
+  for (const pattern of retiredEmbeddedPatterns) assert.doesNotMatch(release, pattern);
+  // The native smoke runs in the release build job; this is the only workflow.
   assert.match(release, /smoke-server-resource\.mjs[\s\S]*--archive/);
-  assert.match(ci, /node scripts\/verify-icon-assets\.mjs/);
 
   // The desktop release chain was removed: server assets only.
   assert.doesNotMatch(release, /build-desktop-release|assemble-release|attest-release/);
@@ -118,13 +112,11 @@ test("release workflow ships standalone Server archives with a signed manifest",
 });
 
 test("every native Server job verifies and ships the locked default extension bundle", () => {
-  const ci = fs.readFileSync(ciPath, "utf8");
   const release = fs.readFileSync(releasePath, "utf8");
-  const ciProduct = jobBlock(ci, "product-quality");
   const releaseValidation = jobBlock(release, "validate");
   const releaseServer = jobBlock(release, "build-server-release");
 
-  for (const preflight of [ciProduct, releaseValidation, releaseServer]) {
+  for (const preflight of [releaseValidation, releaseServer]) {
     assert.match(preflight, /extensions\/package-lock\.json/);
     assert.match(preflight, /node scripts\/default-extension-bundle\.mjs/);
   }
@@ -147,57 +139,3 @@ test("every native Server job verifies and ships the locked default extension bu
   }
 });
 
-test("security workflow installs locked verifier dependencies and lints workflows", () => {
-  const security = fs.readFileSync(securityPath, "utf8");
-  const lockVerification = "node scripts/verify-server-lock.mjs";
-  const extensionVerification = "node scripts/default-extension-bundle.mjs";
-  const install = "npm ci --prefix server --ignore-scripts --no-audit --no-fund";
-  const tests = "scripts/privacy-scan.test.mjs";
-  assert.ok(
-    security.indexOf(lockVerification) !== -1
-      && security.indexOf(lockVerification) < security.indexOf(install),
-  );
-  assert.ok(
-    security.indexOf(extensionVerification) > security.indexOf(lockVerification)
-      && security.indexOf(extensionVerification) < security.indexOf(install),
-  );
-  assert.ok(security.indexOf(install) !== -1 && security.indexOf(install) < security.indexOf(tests));
-  for (const testFile of [
-    "default-extension-bundle.test.mjs",
-    "server-release-sbom.test.mjs",
-    "smoke-server-resource.test.mjs",
-    "verify-server-lock.test.mjs",
-    "verify-server-release.test.mjs",
-  ]) {
-    assert.ok(security.includes(`scripts/${testFile}`), `missing security test: ${testFile}`);
-  }
-  const dependencyAudit = jobBlock(security, "dependency-audit");
-  assert.match(dependencyAudit, /project: extensions\n {12}directory: extensions/);
-  assert.match(dependencyAudit, /npm audit --package-lock-only --omit=peer --audit-level=high/);
-  assert.match(security, /readonly version="1\.7\.12"/);
-  assert.match(security, /readonly expected="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"/);
-  assert.match(security, /"\$\{RUNNER_TEMP\}\/actionlint" -color=false \.github\/workflows\/\*\.yml/);
-});
-
-test("security workflow gates GHAS features and covers every first-party language", () => {
-  const security = fs.readFileSync(securityPath, "utf8");
-  const dependencyReview = jobBlock(security, "dependency-review");
-  const codeql = jobBlock(security, "codeql");
-  const rustAudit = jobBlock(security, "rust-audit");
-  const scheduledRustAudit = jobBlock(security, "rust-audit-scheduled");
-  const required = jobBlock(security, "required");
-
-  for (const job of [dependencyReview, codeql]) {
-    assert.match(job, /github\.event\.repository\.visibility == 'public'/);
-    assert.match(job, /vars\.GHAS_ENABLED == 'true'/);
-  }
-  for (const language of ["actions", "javascript-typescript", "rust"]) {
-    assert.match(codeql, new RegExp(`^ {10}- ${language}$`, "m"));
-  }
-  assert.match(codeql, /build-mode: none/);
-  assert.doesNotMatch(rustAudit, /^ {6}issues: write$/m);
-  assert.match(scheduledRustAudit, /^ {6}issues: write$/m);
-  assert.match(required, /^ {4}name: Security required$/m);
-  assert.match(required, /CODEQL_RESULT/);
-  assert.match(required, /RUST_AUDIT_SCHEDULED_RESULT/);
-});

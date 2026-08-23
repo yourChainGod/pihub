@@ -13,7 +13,8 @@
     "test:e2e:headed": "playwright test --headed",
     "server:build": "node scripts/build-portable-server.mjs",
     "check:extensions": "node scripts/check-extension-manifest.mjs",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release:preflight": "node scripts/release-preflight.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
