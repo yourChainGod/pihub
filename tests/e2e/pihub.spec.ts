@@ -1081,16 +1081,14 @@ test.describe("Server 本地直传更新", () => {
     expect((await desktopCalls(page)).filter((call) => call.command === "check_local_server_update")).toHaveLength(0);
   });
 
-  test("未配置目录时使用内置默认目录正常检测", async ({ page }) => {
+  test("未配置目录时提示先配置且不发起检测", async ({ page }) => {
     await installDesktopMock(page);
     const dialog = await openUpdatesPanel(page);
     const server = dialog.locator(".setup-row").filter({ hasText: "PiHub Server" });
-    await expect(server).toContainText("当前 v0.0.1 · 本地包 v0.0.2");
-    await expect(server.getByRole("button", { name: "直传安装 v0.0.2" })).toBeEnabled();
-    await expect(dialog.getByRole("alert")).toHaveCount(0);
-    const calls = (await desktopCalls(page)).filter((call) => call.command === "check_local_server_update");
-    expect(calls.length).toBeGreaterThan(0);
-    for (const call of calls) expect(String(call.args?.directory)).toContain("release-artifacts");
+    // 隐私门禁禁止内置开发者本机路径：未配置目录时必须停在不访问任何目录的空态
+    await expect(server).toContainText("未配置");
+    await expect(dialog.locator(".setup-plan").filter({ hasText: "未配置本地发布包目录" })).toBeVisible();
+    expect((await desktopCalls(page)).filter((call) => call.command === "check_local_server_update")).toHaveLength(0);
   });
 
   test("本地包已最新时显示已就绪", async ({ page }) => {
