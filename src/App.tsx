@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { PiHubDeviceIcon, PiHubTailnetIcon } from "./PiHubIcons";
 import { ConfirmDialog, useDialogFocus } from "./dialogs";
-import { bootstrapPairingCode, bootstrapTailnetPeer, credentialStatus, DEFAULT_BOOTSTRAP_EXTENSIONS, deviceId, forgetDeviceCredential, importLegacyDeviceMetadata, isValidPairingCode, listDevices, localReleaseDirectory, normalizePairingCode, normalizeUrl, onBootstrapLog, openDevice, openTailscaleApproval, pairDevice, probe, relayTokenConfigured, removeDevice, saveDevice, scanTailnet, setRelayToken, scrubBootstrapSecrets } from "./lib";
+import { bootstrapPairingCode, bootstrapTailnetPeer, credentialStatus, DEFAULT_BOOTSTRAP_EXTENSIONS, deviceId, forgetDeviceCredential, importLegacyDeviceMetadata, isValidPairingCode, listDevices, localReleaseDirectory, normalizePairingCode, normalizeUrl, onBootstrapLog, openDevice, openTailscaleApproval, pairDevice, isRelayDevice, probe, relayTokenConfigured, removeDevice, saveDevice, scanTailnet, setRelayToken, scrubBootstrapSecrets } from "./lib";
 import type { Device, DeviceStatus, TailnetPeer, TailnetScan } from "./types";
 
 const Workspace = lazy(() => import("./Workspace"));
@@ -278,16 +278,15 @@ function DeviceCard({ device, status, paired, onOpen, onRefresh, onPair, onUnpai
     return () => { document.removeEventListener("pointerdown", close, true); document.removeEventListener("keydown", escape); };
   }, [menu]);
   return (
-    <article className="device-card" style={{ "--accent": device.accent } as React.CSSProperties}>
+    <article className={`device-card${menu ? " menu-open" : ""}`} style={{ "--accent": device.accent } as React.CSSProperties}>
       <div className="device-icon"><PiHubDeviceIcon os={device.os} size={20} /><span className={`state-indicator ${state}`} /></div>
       <div className="card-body">
         <h3>{device.name}</h3>
-        <div className="host"><span>{device.source === "tailscale" ? "TAILSCALE 网络" : "直连"}</span>{device.host}</div>
+        <div className="host"><span>{isRelayDevice(device) ? "RELAY" : device.source === "tailscale" ? "TAILSCALE" : "直连"}</span>{device.host}</div>
       </div>
-      <div className="card-stats">
-        <div><small>状态</small><strong className={state}>{state === "online" ? "在线" : state === "auth" ? "待配对" : state === "checking" ? "检查中" : "离线"}</strong></div>
-        <div><small>延迟</small><strong>{status?.latencyMs !== undefined ? `${status.latencyMs} ms` : "—"}</strong></div>
-        <div><small>版本</small><strong>{status?.version ? `v${status.version.replace(/^v/, "")}` : "—"}</strong></div>
+      <div className="card-side">
+        <span className={`status-pill ${state}`}>{state === "online" ? "在线" : state === "auth" ? "待配对" : state === "checking" ? "检查中" : "离线"}</span>
+        <span className="card-meta">{status?.latencyMs !== undefined ? `${status.latencyMs} ms` : "—"} · {status?.version ? `v${status.version.replace(/^v/, "")}` : "—"}</span>
       </div>
       <div className="card-actions">
         <button className="tiny-button" onClick={onRefresh} disabled={state === "checking"} aria-label={`刷新 ${device.name} 状态`}><RefreshCw size={15} className={state === "checking" ? "spin" : undefined} /></button>

@@ -210,18 +210,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, [role="button
   padding: 12px 15px;
   background: var(--card-bg);
   position: relative;
-  overflow: hidden;
+  /* Menus must escape the card; corner shaping lives on the pseudo bars. */
+  overflow: visible;
   box-shadow: 0 1px 2px rgba(0, 0, 0, .03), 0 1px 3px rgba(0, 0, 0, .02);
   transition: transform .22s var(--ease), border-color .22s var(--ease), box-shadow .22s var(--ease);
 }
+.device-card.menu-open { z-index: 30; }
 .device-card:before {
   content: ""; position: absolute; inset: 0 auto 0 0;
-  width: 3px;
+  width: 3px; border-radius: 14px 0 0 14px;
   background: linear-gradient(180deg, transparent, var(--accent) 18%, var(--accent) 82%, transparent);
   opacity: .8; transition: opacity .22s var(--ease), width .22s var(--ease);
 }
 .device-card:after {
   content: ""; position: absolute; inset: 0; pointer-events: none;
+  border-radius: 14px;
   background: radial-gradient(120% 100% at 0% 50%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 62%);
   opacity: 0; transition: opacity .25s var(--ease);
 }
@@ -284,6 +287,16 @@ html.dark .device-card { background: linear-gradient(145deg, rgba(38, 38, 40, .9
   padding: 2px 6px; border-radius: 5px; font-size: 9px; font-weight: 600;
   flex: 0 0 auto;
 }
+.card-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; z-index: 1; }
+.status-pill {
+  font-size: 10.5px; font-weight: 600; padding: 2.5px 9px; border-radius: 99px;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.status-pill.online { color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); border-color: color-mix(in srgb, var(--green) 25%, transparent); }
+.status-pill.auth { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); border-color: color-mix(in srgb, var(--warn) 25%, transparent); }
+.status-pill.checking { color: var(--text-muted); background: var(--bg-subtle); border-color: var(--card-border); }
+.status-pill.offline { color: var(--text-dim); background: var(--bg-subtle); border-color: var(--card-border); }
+.card-meta { font: 10px var(--font-mono); color: var(--text-dim); white-space: nowrap; }
 .card-stats { display: flex; align-items: center; z-index: 1; }
 .card-stats div + div { border-left: 1px solid var(--line); padding-left: 13px; margin-left: 13px; }
 .card-stats small { display: block; color: var(--text-dim); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .02em; margin-bottom: 3px; }
