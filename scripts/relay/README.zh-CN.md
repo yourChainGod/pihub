@@ -1,7 +1,9 @@
 # PiHub Relay（tokyo-arm）
 
-单容器 NATS Core，直接终结 WSS（Cloudflare origin 证书），无 JetStream、无持久化。
+两个容器：Caddy 终结 WSS（Cloudflare origin 证书）→ NATS Core（无 JetStream、无持久化）。
+Caddy 同时负责规整 WebSocket Upgrade 头——CF 代理后的请求头格式会被 NATS 严格校验拒绝。
 入口：`wss://relay.ffuu.eu.org`（CF 橙云 → tokyo-arm:443）。
+注意：CF 后台必须开启 Network → WebSockets，且 SSL/TLS 为 Full (Strict)。
 
 ## 主机目录 `/root/pihub-relay/`
 
@@ -48,7 +50,7 @@ NATS 层只是传输隔离；真正的授权是端到端 HMAC 签名（未配对
 
 ## 运维
 
-- 日志：`docker logs pihub-relay-nats --tail 200`
+- 日志：`docker logs pihub-relay-nats --tail 200` / `docker logs pihub-relay-caddy --tail 200`
 - 热加载账号：`docker kill -s HUP pihub-relay-nats`
 - 换证书：替换 certs/ 后 `docker compose restart`（origin 证书 15 年有效，几乎不用管）
 - 备份：`accounts.json` 与 `certs/` 即可，无其他状态

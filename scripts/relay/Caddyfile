@@ -1,0 +1,7 @@
+# PiHub relay entry: Cloudflare → Caddy (origin cert, Full Strict) → NATS websocket.
+# Caddy re-canonicalizes the Upgrade/Connection headers; Cloudflare's proxy
+# mangles them in a way NATS's strict handshake rejects.
+relay.ffuu.eu.org {
+	tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
+	reverse_proxy pihub-relay-nats:8080
+}
