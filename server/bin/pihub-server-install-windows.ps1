@@ -211,22 +211,49 @@ function Test-PrivateAcl {
       [System.Security.AccessControl.FileSystemRights]::FullControl))
 }
 
+function Stop-PiHubOrphanProcesses {
+  # Stop-ScheduledTask stops the task's root process but orphans the node
+  # supervisor tree; survivors keep 127.0.0.1:30141 bound and the next
+  # candidate then dies with EADDRINUSE (observed on desktop-fr, 0.0.9).
+  # Sweep any node process whose command line lives under the PiHub Server
+  # directory and wait for the loopback port to be released.
+  $binDir = Split-Path -Parent $ServerPath
+  $versionDir = Split-Path -Parent $binDir
+  $versionsDir = Split-Path -Parent $versionDir
+  $serverRoot = Split-Path -Parent $versionsDir
+  $needle = $serverRoot.ToLowerInvariant()
+  Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($needle)
+  } | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+  for ($attempt = 0; $attempt -lt 50; $attempt += 1) {
+    $listener = Get-NetTCPConnection -LocalPort 30141 -LocalAddress 127.0.0.1 -State Listen -ErrorAction SilentlyContinue
+    if ($null -eq $listener) { return }
+    Start-Sleep -Milliseconds 100
+  }
+}
+
 function Stop-TaskAndWait {
   param([Parameter(Mandatory = $true)][string]$Name)
 
   $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
-  if ($null -eq $task -or $task.State -ne "Running") {
-    return
-  }
-  Stop-ScheduledTask -TaskName $Name
-  for ($attempt = 0; $attempt -lt 50; $attempt += 1) {
-    Start-Sleep -Milliseconds 100
-    $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
-    if ($null -eq $task -or $task.State -ne "Running") {
-      return
+  if ($null -ne $task -and $task.State -eq "Running") {
+    Stop-ScheduledTask -TaskName $Name
+    $stopped = $false
+    for ($attempt = 0; $attempt -lt 50; $attempt += 1) {
+      Start-Sleep -Milliseconds 100
+      $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+      if ($null -eq $task -or $task.State -ne "Running") {
+        $stopped = $true
+        break
+      }
+    }
+    if (-not $stopped) {
+      throw "Scheduled task '$Name' did not stop within five seconds."
     }
   }
-  throw "Scheduled task '$Name' did not stop within five seconds."
+  Stop-PiHubOrphanProcesses
 }
 
 function Get-PiHubHealthSnapshot {
@@ -250,7 +277,11 @@ function Get-PiHubHealthSnapshot {
 }
 
 function Wait-PiHubHealth {
-  $deadline = [DateTime]::UtcNow.AddSeconds(20)
+  # Cold start under Task Scheduler is much slower than a direct launch:
+  # powershell → installer ACL setup → supervisor init → Next child can take
+  # well over 20s on a loaded box (observed on desktop-fr: node only appeared
+  # ~15s in). 20s was enough only for warm, already-running candidates.
+  $deadline = [DateTime]::UtcNow.AddSeconds(90)
   $lastReason = "unreachable"
   do {
     $snapshot = Get-PiHubHealthSnapshot
