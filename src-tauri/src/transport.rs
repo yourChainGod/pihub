@@ -324,8 +324,30 @@ pub(crate) fn validate_generic_api_route(endpoint: &url::Url, method: &str) -> R
             validate_query_shape(&query, &["cwd"], &[])
         }
         ["api", "pihub", "updates"] if method == "POST" => no_query(&query),
+        ["api", "pihub", "components"] if matches!(method, "GET" | "POST") => no_query(&query),
+        ["api", "pihub", "todos"] if method == "GET" => {
+            validate_query_shape(&query, &["sessionId"], &["sessionId"])?;
+            if query["sessionId"].is_empty() || query["sessionId"].len() > 256 {
+                return Err("会话标识无效".into());
+            }
+            Ok(())
+        }
+        ["api", "pihub", "subagents"] if method == "GET" => {
+            validate_query_shape(&query, &["sessionId"], &["sessionId"])?;
+            if query["sessionId"].is_empty() || query["sessionId"].len() > 256 {
+                return Err("会话标识无效".into());
+            }
+            Ok(())
+        }
+        ["api", "pihub", "permissions"] if matches!(method, "GET" | "POST" | "DELETE") => {
+            no_query(&query)
+        }
         ["api", "file-index"] if method == "GET" => {
-            validate_query_shape(&query, &["cwd"], &["cwd"])
+            validate_query_shape(&query, &["cwd", "q"], &["cwd"])?;
+            if query.get("q").is_some_and(|value| value.len() > 256) {
+                return Err("文件搜索词过长".into());
+            }
+            Ok(())
         }
         ["api", "git", "status"] if method == "GET" => {
             validate_query_shape(&query, &["cwd"], &["cwd"])
@@ -1474,6 +1496,14 @@ mod tests {
             ("/api/skills", "PATCH"),
             ("/api/plugins?cwd=%2Frepo", "GET"),
             ("/api/plugins", "POST"),
+            ("/api/pihub/components", "GET"),
+            ("/api/pihub/components", "POST"),
+            ("/api/pihub/todos?sessionId=s1", "GET"),
+            ("/api/pihub/subagents?sessionId=s1", "GET"),
+            ("/api/pihub/permissions", "GET"),
+            ("/api/pihub/permissions", "POST"),
+            ("/api/pihub/permissions", "DELETE"),
+            ("/api/file-index?cwd=%2Frepo&q=main", "GET"),
         ] {
             assert!(
                 validated_api_endpoint(&base, path, ApiAccess::Generic { method }).is_ok(),
@@ -1492,6 +1522,10 @@ mod tests {
             ("/api/skills", "POST"),
             ("/api/plugins?cwd=%2Frepo&extra=1", "GET"),
             ("/api/project-trust", "GET"),
+            ("/api/pihub/components?extra=1", "GET"),
+            ("/api/pihub/todos", "GET"),
+            ("/api/pihub/subagents?sessionId=", "GET"),
+            ("/api/pihub/permissions?extra=1", "POST"),
         ] {
             assert!(
                 validated_api_endpoint(&base, path, ApiAccess::Generic { method }).is_err(),
