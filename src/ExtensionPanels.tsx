@@ -21,7 +21,8 @@ import type { Device, RailTodo, RemoteAskAnswer, RemoteAskFlow, RemoteAskQuestio
 /**
  * Read-only todo list pinned above the composer. Replays the session transcript
  * to find the latest pi-todo-rail snapshot. Done items render with a
- * strikethrough. The agent and the user's /todo commands are the only writers.
+ * strikethrough; once every item is done the panel closes itself. The agent and
+ * the user's /todo commands are the only writers.
  */
 export function TodoRail({ device, sessionId, refreshKey }: {
   device: Device | null;
@@ -49,6 +50,9 @@ export function TodoRail({ device, sessionId, refreshKey }: {
   if (!sessionId || !todos.length) return null;
 
   const done = todos.filter((t) => t.done).length;
+  // Everything finished: the panel closes itself instead of lingering as a
+  // fully-struck list.
+  if (done === todos.length) return null;
   const currentId = todos.find((t) => !t.done)?.id;
 
   return <div className="todo-rail">
@@ -201,8 +205,8 @@ export function PermissionPill({ device }: { device: Device | null }) {
 const SUBAGENT_POLL_MS = 2000;
 
 /**
- * Subagent progress, refreshed by polling. Only mounts a timer while at least
- * one subagent is running so an idle session costs nothing.
+ * Subagent progress, refreshed by polling. The panel only renders while at
+ * least one subagent is running and closes itself once all of them settle.
  */
 export function SubagentPanel({ device, sessionId }: { device: Device | null; sessionId: string | null }) {
   const [subagents, setSubagents] = useState<RemoteSubagent[]>([]);
@@ -232,12 +236,14 @@ export function SubagentPanel({ device, sessionId }: { device: Device | null; se
 
   if (!subagents.length) return null;
   const running = subagents.filter((item) => item.status === "running").length;
+  // Close the panel as soon as every subagent has settled.
+  if (running === 0) return null;
 
   return <div className="subagent-panel">
     <button className="subagent-head" aria-expanded={!collapsed} onClick={() => setCollapsed(!collapsed)}>
       {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
       <strong>子代理</strong>
-      <span>{running > 0 ? `${running} 运行中` : `${subagents.length} 已结束`}</span>
+      <span>{`${running} 运行中`}</span>
     </button>
     {!collapsed && <ul className="subagent-list">
       {subagents.map((item) => <li key={item.id} className={`sa-${item.status}`}>

@@ -22,6 +22,10 @@ type CoreToolTab = "files" | "git" | "terminal";
 type ToolTab = CoreToolTab | "resources";
 const TOOL_TABS: ToolTab[] = ["files", "git", "terminal", "resources"];
 
+// pi-todo-rail's own TUI widget duplicates the native TodoRail panel; the
+// desktop keeps only the native one.
+const SUPPRESSED_WIDGET_KEYS = new Set(["todo-execution-rail"]);
+
 export default function Workspace({ deviceId }: { deviceId: string }) {
   const [device, setDevice] = useState<Device | null>(null);
   const [sessions, setSessions] = useState<RemoteSession[]>([]);
@@ -560,7 +564,7 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
       // (older server) keeps the event-driven state; a present array (even
       // empty) is authoritative. A stopped session drops its widgets.
       const snapshot = result.running ? result.state?.extensionWidgets : undefined;
-      if (snapshot) widgetsRef.current.set(sessionId, new Map(snapshot.map((item) => [item.key, item])));
+      if (snapshot) widgetsRef.current.set(sessionId, new Map(snapshot.filter((item) => !SUPPRESSED_WIDGET_KEYS.has(item.key)).map((item) => [item.key, item])));
       else if (!result.running) widgetsRef.current.delete(sessionId);
       publishWidgets(sessionId);
       // Once a wrapper is live, sync the active tool preset from get_tools.
@@ -643,6 +647,7 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
           return;
         }
         if (request.method === "setWidget" && request.widgetKey) {
+          if (SUPPRESSED_WIDGET_KEYS.has(request.widgetKey)) return;
           const map = widgetsRef.current.get(sessionId) ?? new Map<string, RemoteWidgetItem>();
           if (request.widgetLines === undefined) map.delete(request.widgetKey);
           else map.set(request.widgetKey, { key: request.widgetKey, lines: request.widgetLines, placement: request.widgetPlacement });
