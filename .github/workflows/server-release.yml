@@ -437,7 +437,7 @@ jobs:
               -f tag_name="${tag}" \
               -f target_commitish="${commit}" \
               -f name="PiHub Server ${tag}" \
-              -f body='Signed PiHub Server artifacts. Keep as draft until native install, update, and rollback verification pass.'" \
+              -f body="Signed PiHub Server artifacts. Keep as draft until native install, update, and rollback verification pass." \
               -f draft=true \
               -f prerelease=false)"
             release_id="$(jq -er '.id' <<<"${release_json}")"
