@@ -1615,6 +1615,7 @@ async function validateBundledRuntime(root, version, withExtensions) {
     "node_modules/next/package.json",
     "node_modules/next/dist/bin/next",
     "bin/pihub-server.js",
+    "bin/pihub-connector.js",
     "bin/runtime-entry.js",
   ]) {
     await assertRegularFile(path.join(root, ...relative.split("/")), `Server runtime file ${relative}`);

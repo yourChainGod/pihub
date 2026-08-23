@@ -865,3 +865,50 @@ test("malformed, unauthorized, and non-request IPC messages are ignored", async 
   assert.equal(applyCalls, 0);
   assert.equal(supervisor.updateState.phase, "idle");
 });
+
+test("relay connector spawn is gated by connectorConfigured and restarts on crash only", async () => {
+  const spawned = [];
+  const make = (connectorConfigured) => createSupervisor({
+    connectorConfigured,
+    spawnImpl(command, args, options) {
+      const child = new FakeChild();
+      spawned.push({ child, command, args, options });
+      return child;
+    },
+  });
+
+  // Not configured: nothing spawns.
+  const off = make(() => false);
+  off.supervisor.spawnConnector(process.cwd(), CURRENT_VERSION);
+  assert.equal(spawned.length, 0);
+
+  // Configured: spawns bin/pihub-connector.js from the same package root.
+  const on = make(() => true);
+  on.supervisor.spawnConnector(process.cwd(), CURRENT_VERSION);
+  assert.equal(spawned.length, 1);
+  assert.ok(spawned[0].args[0].endsWith(path.join("bin", "pihub-connector.js")));
+  assert.equal(spawned[0].options.cwd, process.cwd());
+
+  // Clean exit (code 0, e.g. "not configured"): no restart is scheduled.
+  spawned[0].child.emit("exit", 0, null);
+  await immediate();
+  assert.equal(spawned.length, 1);
+
+  // Crash: a restart is scheduled (fires after a delay, not immediately).
+  on.supervisor.currentChild = new FakeChild();
+  on.supervisor.spawnConnector(process.cwd(), CURRENT_VERSION);
+  assert.equal(spawned.length, 2);
+  spawned[1].child.emit("exit", 1, null);
+  await immediate();
+  assert.equal(spawned.length, 2, "restart waits for the delay");
+  await new Promise((resolve) => setTimeout(resolve, 5_300));
+  assert.equal(spawned.length, 3, "crash restart fired");
+
+  // Shutdown stops the connector and suppresses restarts.
+  spawned[2].child.emit("exit", 1, null);
+  await immediate();
+  const before = spawned.length;
+  on.supervisor.shuttingDown = true;
+  await new Promise((resolve) => setTimeout(resolve, 5_300));
+  assert.equal(spawned.length, before, "no restart during shutdown");
+}, { timeout: 20_000 });

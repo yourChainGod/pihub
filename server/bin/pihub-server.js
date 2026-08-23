@@ -98,6 +98,7 @@ async function main() {
   const jiti = createJiti(__filename, { interopDefault: true });
   const { readDefaultExtensionsSelection } = await jiti.import("../lib/default-extensions.ts");
   const { getServerUpdateDataRoot, ProductionServerUpdateRuntime } = await jiti.import("../lib/server-update-runtime.ts");
+  const { loadConnectorConfig } = await jiti.import("../lib/connector.ts");
   const dataRoot = getServerUpdateDataRoot({ platform: target.platform });
   const selectedDefaultExtensions = await readDefaultExtensionsSelection(dataRoot);
   const defaultExtensionsEnabled = selectedDefaultExtensions.length > 0;
@@ -116,6 +117,15 @@ async function main() {
       baseRuntimeEnvironment,
       defaultExtensionsEnabled,
       selectedDefaultExtensions,
+      // The relay connector only runs on hosts that opted in via
+      // state/connector.json; a broken config must never block the server.
+      connectorConfigured: () => {
+        try {
+          return loadConnectorConfig(dataRoot) !== null;
+        } catch {
+          return false;
+        }
+      },
       ...logSinks,
       logger: createSupervisorLogger(logSinks.stderrLogSink),
       runtimeFactory: ({ health }) => new ProductionServerUpdateRuntime({

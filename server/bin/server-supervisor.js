@@ -209,6 +209,9 @@ class StableServerSupervisor {
     this.extensionProvisioner = options.extensionProvisioner || provisionSignedDefaultExtensions;
     this.spawnImpl = options.spawnImpl || spawn;
     this.fetchImpl = options.fetchImpl || globalThis.fetch;
+    // Optional: when this probe returns true, the relay connector is spawned
+    // alongside every (non-candidate) server child from the same package root.
+    this.connectorConfigured = options.connectorConfigured || (() => false);
     this.parentProcess = options.parentProcess || process;
     this.logger = options.logger || console;
     this.stdoutLogSink = options.stdoutLogSink || null;
@@ -217,6 +220,9 @@ class StableServerSupervisor {
     this.randomId = options.randomId || (() => randomBytes(16).toString("hex"));
     this.currentChild = null;
     this.currentChildVersion = null;
+    this.connectorChild = null;
+    this.connectorRestartTimer = null;
+    this.plannedConnectorStops = new WeakSet();
     this.candidateChildren = new Set();
     this.candidateWarnings = new WeakSet();
     this.plannedStops = new WeakSet();
@@ -269,6 +275,7 @@ class StableServerSupervisor {
         clearTimeout(this.restartTimer);
         this.restartTimer = null;
       }
+      this.stopConnector();
       const candidates = [...this.candidateChildren];
       const stopped = await Promise.allSettled(candidates.map((child) => this.stopChild(child)));
       for (const result of stopped) {
@@ -415,6 +422,13 @@ class StableServerSupervisor {
         }
         this.handleCurrentExit(child, child.exitCode, child.signalCode);
       });
+      // The relay connector follows the server child's version; its failure
+      // must never take the server down with it.
+      try {
+        this.spawnConnector(packageRoot, version);
+      } catch (error) {
+        this.logger.warn(`PiHub relay connector did not start (${safeErrorCode(error)}).`);
+      }
     }
     child.stdout?.on("data", (chunk) => {
       const text = String(chunk);
@@ -428,6 +442,55 @@ class StableServerSupervisor {
     if (this.stdoutLogSink) child.stdout?.pipe?.(this.stdoutLogSink, { end: false });
     if (this.stderrLogSink) child.stderr?.pipe?.(this.stderrLogSink, { end: false });
     return child;
+  }
+
+  spawnConnector(packageRoot, version) {
+    this.stopConnector();
+    const entry = path.join(packageRoot, "bin", "pihub-connector.js");
+    if (!this.connectorConfigured() || !fs.existsSync(entry)) return;
+    const child = this.spawnImpl(process.execPath, [entry], {
+      cwd: packageRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: this.childEnvironment(packageRoot, version),
+      windowsHide: true,
+    });
+    if (!child || typeof child.once !== "function") throw new Error("Could not start the PiHub relay connector");
+    this.connectorChild = child;
+    if (this.stdoutLogSink) child.stdout?.pipe?.(this.stdoutLogSink, { end: false });
+    if (this.stderrLogSink) child.stderr?.pipe?.(this.stderrLogSink, { end: false });
+    child.once("exit", (code, signal) => {
+      if (this.connectorChild !== child) return;
+      this.connectorChild = null;
+      // Exit code 0 means "not configured / clean stop" — stay down. Crashes
+      // retry with a fixed delay; the connector has its own reconnect loop,
+      // so a process exit is always a bug or a broken config.
+      if (this.shuttingDown || this.plannedConnectorStops.has(child)) return;
+      if (code === 0 && !signal) return;
+      this.logger.warn("PiHub relay connector exited unexpectedly; restarting in 5s.");
+      this.connectorRestartTimer = setTimeout(() => {
+        this.connectorRestartTimer = null;
+        if (this.shuttingDown || !this.currentChild) return;
+        try {
+          this.spawnConnector(packageRoot, version);
+        } catch (error) {
+          this.logger.warn(`PiHub relay connector restart failed (${safeErrorCode(error)}).`);
+        }
+      }, 5_000);
+    });
+  }
+
+  stopConnector() {
+    if (this.connectorRestartTimer) {
+      clearTimeout(this.connectorRestartTimer);
+      this.connectorRestartTimer = null;
+    }
+    const child = this.connectorChild;
+    if (!child) return;
+    this.connectorChild = null;
+    this.plannedConnectorStops.add(child);
+    try {
+      child.kill("SIGTERM");
+    } catch { /* already gone */ }
   }
 
   openBrowser() {
