@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { PiHubDeviceIcon, PiHubTailnetIcon } from "./PiHubIcons";
 import { ConfirmDialog, useDialogFocus } from "./dialogs";
-import { bootstrapPairingCode, bootstrapTailnetPeer, credentialStatus, DEFAULT_BOOTSTRAP_EXTENSIONS, deviceId, forgetDeviceCredential, importLegacyDeviceMetadata, isValidPairingCode, listDevices, localReleaseDirectory, normalizePairingCode, normalizeUrl, onBootstrapLog, openDevice, openTailscaleApproval, pairDevice, probe, removeDevice, saveDevice, scanTailnet, scrubBootstrapSecrets } from "./lib";
+import { bootstrapPairingCode, bootstrapTailnetPeer, credentialStatus, DEFAULT_BOOTSTRAP_EXTENSIONS, deviceId, forgetDeviceCredential, importLegacyDeviceMetadata, isValidPairingCode, listDevices, localReleaseDirectory, normalizePairingCode, normalizeUrl, onBootstrapLog, openDevice, openTailscaleApproval, pairDevice, probe, relayTokenConfigured, removeDevice, saveDevice, scanTailnet, setRelayToken, scrubBootstrapSecrets } from "./lib";
 import type { Device, DeviceStatus, TailnetPeer, TailnetScan } from "./types";
 
 const Workspace = lazy(() => import("./Workspace"));
@@ -260,7 +260,7 @@ function FleetApp() {
       {pairing && <PairingModal device={pairing} onClose={() => setPairing(null)} onPaired={async () => { setPaired((old) => ({ ...old, [pairing.id]: true })); await refreshStatus([pairing]); }} onOpen={() => { void openDevice(pairing); setPairing(null); }} />}
       {unpairing && <ConfirmDialog title={`解除“${unpairing.name}”的本机配对？`} message="系统凭据将从这台电脑移除，远端设备与数据不受影响。" confirmLabel="解除配对" danger onConfirm={() => void confirmUnpairDevice()} onClose={() => setUnpairing(null)} />}
       {removing && <ConfirmDialog title={`从 PiHub 移除“${removing.name || "该设备"}”？`} message="远端服务和数据不会被删除。" confirmLabel="移除" danger onConfirm={() => void confirmDeleteDevice()} onClose={() => setRemoving(null)} />}
-      {modal === "settings" && <Modal title="连接设置" subtitle="这些约束会在客户端和服务端同时强制执行" onClose={() => setModal(null)}><div className="info-modal"><label className="settings-port">默认服务端口<input type="number" min="1" max="65535" value={port} onChange={(event) => setPort(Number(event.target.value))} /></label><label className="settings-port">本地发布包目录<input value={localReleaseDir} onChange={(event) => setLocalReleaseDir(event.target.value)} placeholder="留空则使用内置默认目录" /></label><InfoRow title="本地直传" text="填写 build-server-release.mjs 产出的发布包目录后，SSH 安装会直接上传本地包并校验 SHA-256，不再访问 GitHub；安装完成且设备未配对时会自动签发一次性配对码完成配对。" /><InfoRow title="会话隐私" text="会话正文只保留在当前进程内存中；关闭窗口后清除，需要时从远端设备重新读取。" /><InfoRow title="网络范围" text="仅接受 .ts.net、Tailscale CGNAT 与 Tailscale IPv6；不提供公网或普通 LAN 回退。" /><InfoRow title="服务入口" text="PiHub Server 仅监听 127.0.0.1，并由 Tailscale Serve 提供 HTTPS。" /><div className="settings-migration"><InfoRow title="旧版设备" text="仅导入旧版设备名称与地址；系统凭据不会读取或复制。" /><button className="secondary-button compact" onClick={() => { setModal(null); setLegacyImportPending(true); }}><Import size={15} />从旧版导入</button></div></div></Modal>}
+      {modal === "settings" && <Modal title="连接设置" subtitle="这些约束会在客户端和服务端同时强制执行" onClose={() => setModal(null)}><div className="info-modal"><label className="settings-port">默认服务端口<input type="number" min="1" max="65535" value={port} onChange={(event) => setPort(Number(event.target.value))} /></label><label className="settings-port">本地发布包目录<input value={localReleaseDir} onChange={(event) => setLocalReleaseDir(event.target.value)} placeholder="留空则使用内置默认目录" /></label><InfoRow title="本地直传" text="填写 build-server-release.mjs 产出的发布包目录后，SSH 安装会直接上传本地包并校验 SHA-256，不再访问 GitHub；安装完成且设备未配对时会自动签发一次性配对码完成配对。" /><InfoRow title="会话隐私" text="会话正文只保留在当前进程内存中；关闭窗口后清除，需要时从远端设备重新读取。" /><InfoRow title="网络范围" text="接受 .ts.net、Tailscale CGNAT/IPv6，以及 *.nodes.ffuu.eu.org 中继节点；不提供普通 LAN 回退。" /><RelaySettings /><InfoRow title="服务入口" text="PiHub Server 仅监听 127.0.0.1，并由 Tailscale Serve 提供 HTTPS。" /><div className="settings-migration"><InfoRow title="旧版设备" text="仅导入旧版设备名称与地址；系统凭据不会读取或复制。" /><button className="secondary-button compact" onClick={() => { setModal(null); setLegacyImportPending(true); }}><Import size={15} />从旧版导入</button></div></div></Modal>}
       {legacyImportPending && <ConfirmDialog title="导入旧版设备？" message="PiHub Desktop 将只读旧版设备清单，并在写入前备份当前清单。旧版密钥不会迁移，导入的设备需要重新配对。" confirmLabel="导入设备" onConfirm={() => void confirmLegacyImport()} onClose={() => setLegacyImportPending(false)} />}
     </div>
   );
@@ -368,12 +368,12 @@ function AddModal({ onClose, onSave, count }: { onClose: () => void; onSave: (de
       onSave({ id: deviceId(url), name: name.trim() || host.split(".")[0], host, url, source: "manual", favorite: false, accent: ACCENTS[count % ACCENTS.length] });
     } catch { setError("请输入有效的主机名、IP 或 URL"); }
   }
-  return <Modal title="添加 PiHub Server 设备" subtitle="使用 Tailnet 主机名或地址连接" onClose={onClose}>
+  return <Modal title="添加 PiHub Server 设备" subtitle="使用 Tailnet 地址或中继节点名连接" onClose={onClose}>
     <form onSubmit={submit} className="modal-form">
       <label>设备名称 <span>可选</span><input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：Studio Mac" /></label>
       <label>地址<input value={address} onChange={(e) => { setAddress(e.target.value); setError(""); }} placeholder="studio-mac.tailnet.ts.net:30141" /></label>
       {error && <div className="form-error">{error}</div>}
-      <div className="hint"><Sparkles size={16} /><span>仅连接 Tailscale Serve 的 <b>HTTPS 30141</b> 端口；公网与普通局域网地址会被拒绝。</span></div>
+      <div className="hint"><Sparkles size={16} /><span>Tailscale 设备用 <b>HTTPS 30141</b>；中继节点填 <b>节点名.nodes.ffuu.eu.org</b>（如 dgn-01.nodes.ffuu.eu.org）。</span></div>
       <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!address.trim()}>保存设备</button></div>
     </form>
   </Modal>;
@@ -458,6 +458,30 @@ function DiscoverModal({ scan, scanning, setupOnly, devices, port, onPort, local
 function Modal({ title, subtitle, onClose, wide, children }: { title: string; subtitle: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
   const dialogRef = useDialogFocus<HTMLDivElement>(onClose);
   return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}><div ref={dialogRef} className={`modal ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}><div className="modal-head"><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></div><div className="modal-body">{children}</div></div></div>;
+}
+
+function RelaySettings() {
+  const [token, setToken] = useState("");
+  const [configured, setConfigured] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { void relayTokenConfigured().then(setConfigured).catch(() => undefined); }, []);
+  async function save() {
+    setError(""); setSaved(false);
+    try {
+      await setRelayToken(token.trim());
+      setToken(""); setConfigured(true); setSaved(true);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  }
+  return <div className="settings-migration">
+    <InfoRow title="中继（Relay）" text={`经 relay.ffuu.eu.org 的 NATS/WSS 中继连接节点，不依赖 Tailscale。${configured ? "传输 token 已配置。" : "尚未配置传输 token。"}`} />
+    <div className="relay-token-row">
+      <input type="password" value={token} aria-label="Relay token" placeholder="粘贴 relay 传输 token" onChange={(event) => { setToken(event.target.value); setSaved(false); setError(""); }} />
+      <button type="button" className="secondary-button compact" disabled={!token.trim()} onClick={() => void save()}>保存</button>
+    </div>
+    {saved && <div className="hint"><Check size={14} /><span>Relay token 已存入系统钥匙串。</span></div>}
+    {error && <div className="form-error">{error}</div>}
+  </div>;
 }
 
 function InfoRow({ title, text }: { title: string; text: string }) { return <div className="info-row"><strong>{title}</strong><span>{text}</span></div>; }

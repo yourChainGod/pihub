@@ -553,12 +553,38 @@ export async function notifyDone(title: string, body: string): Promise<void> {
 export function normalizeUrl(value: string): string {
   const withScheme = /^https?:\/\//i.test(value.trim()) ? value.trim() : `https://${value.trim()}`;
   const parsed = new URL(withScheme);
-  if (!parsed.port) parsed.port = "30141";
   const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  // Relay nodes are virtual origins addressed through the NATS relay; they
+  // never receive direct HTTPS, so no default port is appended.
+  if (host.endsWith(RELAY_NODES_SUFFIX)) {
+    if (parsed.protocol !== "https:" || !parsed.hostname.toLowerCase().split(".")[0]) throw new Error("Relay 节点地址无效");
+    return parsed.origin;
+  }
+  if (!parsed.port) parsed.port = "30141";
   const ipv4 = host.split(".").map(Number);
   const tailscaleIpv4 = ipv4.length === 4 && ipv4[0] === 100 && ipv4[1] >= 64 && ipv4[1] <= 127;
-  if (parsed.protocol !== "https:" || (!host.endsWith(".ts.net") && !tailscaleIpv4 && !host.startsWith("fd7a:115c:a1e0:"))) throw new Error("只允许 Tailscale MagicDNS 或 Tailscale IP 的 HTTPS 地址");
+  if (parsed.protocol !== "https:" || (!host.endsWith(".ts.net") && !tailscaleIpv4 && !host.startsWith("fd7a:115c:a1e0:"))) throw new Error("只允许 Tailscale MagicDNS、Tailscale IP 或 PiHub Relay 节点的 HTTPS 地址");
   return parsed.origin;
+}
+
+export const RELAY_NODES_SUFFIX = ".nodes.ffuu.eu.org";
+
+export function isRelayDevice(device: Pick<Device, "url">): boolean {
+  try {
+    return new URL(device.url).hostname.endsWith(RELAY_NODES_SUFFIX);
+  } catch {
+    return false;
+  }
+}
+
+/** Stores the shared relay transport token in the system keychain. */
+export async function setRelayToken(token: string): Promise<void> {
+  await invokeDesktop("set_relay_token", { token });
+}
+
+export async function relayTokenConfigured(): Promise<boolean> {
+  const status = await invokeDesktop<{ configured: boolean }>("relay_token_status");
+  return status.configured;
 }
 
 export function deviceId(value: string): string {

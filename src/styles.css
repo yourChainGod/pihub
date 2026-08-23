@@ -499,6 +499,13 @@ footer span { color: var(--text-muted); }
 .settings-migration { padding: 2px 2px 12px; border-bottom: 0; }
 .settings-migration .info-row { padding-inline: 0; border-bottom: 0; }
 .settings-migration .secondary-button { margin-top: 2px; }
+.relay-token-row { display: flex; gap: 8px; margin-top: 6px; }
+.relay-token-row input {
+  flex: 1; height: 36px; padding: 0 10px;
+  border: 1px solid var(--card-border); border-radius: 7px;
+  background: var(--input-bg); color: var(--text); outline: 0; font-size: 12.5px;
+}
+.relay-token-row .secondary-button { margin-top: 0; }
 .settings-toggle {
   min-height: 62px; padding: 10px 2px;
   border-bottom: 1px solid var(--line);
