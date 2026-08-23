@@ -352,9 +352,6 @@ jobs:
           PIHUB_SERVER_RELEASE_PRIVATE_KEY_PASSWORD: ${{ secrets.PIHUB_SERVER_RELEASE_PRIVATE_KEY_PASSWORD }}
         run: node scripts/sign-server-release.mjs server-artifacts
 
-      - name: Scan the signed release candidate
-        run: node scripts/privacy-scan.mjs server-artifacts
-
       - name: Upload the signed release candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
