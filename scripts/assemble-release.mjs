@@ -281,7 +281,7 @@ export function assembleRelease(options) {
   }
 
   const expectedServerTargets = new Set([
-    "darwin/arm64", "darwin/x64", "linux/arm64", "linux/x64", "win32/arm64", "win32/x64",
+    "darwin/arm64", "darwin/x64", "linux/arm64", "linux/x64", "win32/x64",
   ]);
   const serverMetadataFiles = fs.readdirSync(serverDirectory)
     .filter((name) => name.endsWith(".asset.json"))

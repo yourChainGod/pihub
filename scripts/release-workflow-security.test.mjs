@@ -132,7 +132,6 @@ test("every native Server job verifies and ships the locked default extension bu
     "runner: macos-15-intel\n            platform: darwin\n            arch: x64",
     "runner: ubuntu-24.04-arm\n            platform: linux\n            arch: arm64",
     "runner: ubuntu-24.04\n            platform: linux\n            arch: x64",
-    "runner: windows-11-arm\n            platform: win32\n            arch: arm64",
     "runner: windows-2025\n            platform: win32\n            arch: x64",
   ]) {
     assert.ok(releaseServer.includes(identity), `missing native Server matrix identity: ${identity}`);

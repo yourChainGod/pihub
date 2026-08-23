@@ -114,7 +114,7 @@ function copyCandidate(source, destination) {
 function createServerFixtures(server) {
   const serverTargets = [
     ["darwin", "arm64"], ["darwin", "x64"], ["linux", "arm64"],
-    ["linux", "x64"], ["win32", "arm64"], ["win32", "x64"],
+    ["linux", "x64"], ["win32", "x64"],
   ];
   const assets = [];
   const checksums = new Map();
@@ -479,7 +479,7 @@ test("collects all desktop targets and assembles verified updater platform entri
       updaterPublicKeyPath: publicKey,
       serverReleaseTrust,
     });
-    assert.deepEqual(verifyCandidate(output), { version: "0.0.1", assets: 43 });
+    assert.deepEqual(verifyCandidate(output), { version: "0.0.1", assets: 40 });
     for (const line of fs.readFileSync(path.join(output, "RELEASE-SHA256SUMS"), "utf8").trim().split("\n")) {
       const match = line.match(/^([a-f0-9]{64})[ ]{2}([A-Za-z0-9._+-]+)$/);
       assert.ok(match, line);
