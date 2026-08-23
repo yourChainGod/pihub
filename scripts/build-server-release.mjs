@@ -183,6 +183,12 @@ try {
     ".next/BUILD_ID",
     "node_modules/next/package.json",
     "node_modules/next/dist/bin/next",
+    // The session worker is spawned from the packaged tree and jiti-imports the
+    // lib sources at runtime; a files-whitelist miss here only surfaces later as
+    // every prompt failing with "Agent request failed".
+    "bin/pi-session-worker.mjs",
+    "lib/rpc-manager.ts",
+    "lib/pi-session-host.ts",
   ]) {
     if (!fs.statSync(path.join(stageDirectory, ...requiredFile.split("/")), { throwIfNoEntry: false })?.isFile()) {
       throw new Error(`Runnable Server release is missing ${requiredFile}`);

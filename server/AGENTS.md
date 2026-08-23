@@ -105,6 +105,7 @@ lib/worktree.ts                  Git worktree operations
 lib/git-command.ts               bounded shell-free Git execution
 lib/pihub-terminal.ts            PTY/ConPTY lifecycle and quotas
 lib/safe-model-runtime.ts        final production model/credential boundary
+lib/pi-cli.ts                    Pi CLI resolution (env, PATH, bundled pinned CLI)
 lib/outbound-http-security.ts    SSRF, redirect and credential forwarding policy
 lib/release-manifest.ts          canonical signed manifest validation
 lib/server-release.ts            fixed GitHub Server update trust

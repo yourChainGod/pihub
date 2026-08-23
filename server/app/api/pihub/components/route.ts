@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { getTrustedPihubRequestContext } from "@/lib/pihub-auth";
 import { readBoundedJsonRequest } from "@/lib/outbound-http-security";
 import { getRunningRpcSessionIds } from "@/lib/rpc-manager";
+import { resolvePiCommand, type PiCommand } from "@/lib/pi-cli";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -27,14 +28,25 @@ function authorize(request: NextRequest): NextResponse | null {
 
 // ── Pi version helpers ──────────────────────────────────────────────────────
 
-const PI_BINARY = process.env.PIHUB_PI_EXECUTABLE?.trim() || "pi";
+let cachedPiCommand: PiCommand | null | undefined;
+
+function getPiCommand(): PiCommand | null {
+  if (cachedPiCommand === undefined) cachedPiCommand = resolvePiCommand();
+  return cachedPiCommand;
+}
+
+function execPi(command: PiCommand, args: string[], timeout: number) {
+  return execFileAsync(command.command, [...command.argsPrefix, ...args], {
+    encoding: "utf8",
+    timeout,
+  });
+}
 
 async function getPiVersion(): Promise<string | null> {
+  const command = getPiCommand();
+  if (!command) return null;
   try {
-    const { stdout } = await execFileAsync(PI_BINARY, ["--version"], {
-      encoding: "utf8",
-      timeout: 5_000,
-    });
+    const { stdout } = await execPi(command, ["--version"], 5_000);
     return stdout.trim().split(/\s+/).pop() ?? null;
   } catch {
     return null;
@@ -42,11 +54,10 @@ async function getPiVersion(): Promise<string | null> {
 }
 
 async function getPiExtensions(): Promise<Array<{ name: string; version: string }>> {
+  const command = getPiCommand();
+  if (!command) return [];
   try {
-    const { stdout } = await execFileAsync(PI_BINARY, ["list", "--json"], {
-      encoding: "utf8",
-      timeout: 10_000,
-    });
+    const { stdout } = await execPi(command, ["list", "--json"], 10_000);
     const data = JSON.parse(stdout) as unknown;
     if (!Array.isArray(data)) return [];
     return data.filter((e): e is { name: string; version: string } =>
@@ -79,10 +90,9 @@ async function runPiUpdate(target: "self" | "extensions" | string): Promise<{ jo
         ? ["update", "--extensions"]
         : ["update", target];
     try {
-      const { stdout, stderr } = await execFileAsync(PI_BINARY, args, {
-        encoding: "utf8",
-        timeout: 120_000,
-      });
+      const command = getPiCommand();
+      if (!command) throw new Error("Pi Agent not found");
+      const { stdout, stderr } = await execPi(command, args, 120_000);
       updateJobs.set(jobId, { status: "done", output: (stdout + stderr).trim(), startedAt, finishedAt: new Date().toISOString() });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -126,7 +136,7 @@ export async function GET(request: NextRequest) {
     pi: {
       current: piVersion,
       available: piVersion !== null,
-      binary: PI_BINARY,
+      binary: getPiCommand()?.display ?? null,
     },
     extensions: {
       items: extensions,
