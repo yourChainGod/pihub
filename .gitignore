@@ -60,3 +60,6 @@ research-results.tsv
 
 # Internal handoff/worklog docs stay local, not pushed to the public repo
 docs/
+
+# Cloudflare origin certificate for the relay domain — never commit
+ffuu.eu.org.txt
