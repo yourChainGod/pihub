@@ -5,19 +5,16 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 use tauri::{AppHandle, Manager};
 
 use crate::{ensure_private_directory, metadata_is_link_like, tighten_private_file};
 
-/// Session transcripts are append-only on the server; the desktop keeps only a
-/// bounded tail per session so reopening is an incremental top-up. The cache
-/// lives in plain files (one folder per device, one JSON per session) instead
-/// of web storage, which both removes the ~5MB localStorage quota cliff and
-/// keeps the data inspectable per device.
-pub(crate) const MAX_SESSION_CACHE_BYTES: usize = 4 * 1024 * 1024;
-pub(crate) const MAX_SESSIONS_PER_DEVICE: usize = 8;
+/// Session transcripts are append-only on the server; the desktop persists
+/// every opened session in full so reopening is an incremental top-up. The
+/// cache lives in plain files (one folder per device, one JSON per session)
+/// instead of web storage, which both removes the ~5MB localStorage quota
+/// cliff and keeps the data inspectable per device.
 
 fn validate_cache_segment(value: &str, label: &str) -> Result<(), String> {
     let valid = !value.is_empty()
@@ -53,22 +50,14 @@ fn read_cache_file(path: &Path) -> Result<Option<String>, String> {
     }
     let mut file = fs::File::open(path).map_err(|error| format!("无法打开会话缓存：{error}"))?;
     let mut data = Vec::new();
-    Read::by_ref(&mut file)
-        .take((MAX_SESSION_CACHE_BYTES + 1) as u64)
-        .read_to_end(&mut data)
+    file.read_to_end(&mut data)
         .map_err(|error| format!("无法读取会话缓存：{error}"))?;
-    if data.len() > MAX_SESSION_CACHE_BYTES {
-        return Err("会话缓存超过大小上限".into());
-    }
     String::from_utf8(data)
         .map(Some)
         .map_err(|_| "会话缓存不是有效 UTF-8".into())
 }
 
 fn write_cache_file(path: &Path, payload: &str) -> Result<(), String> {
-    if payload.len() > MAX_SESSION_CACHE_BYTES {
-        return Err("会话缓存超过大小上限".into());
-    }
     let directory = path.parent().ok_or("会话缓存没有父目录")?;
     ensure_private_directory(directory)?;
     match fs::symlink_metadata(path) {
@@ -136,36 +125,6 @@ fn delete_cache_file(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Keeps only the newest few cached sessions per device; eviction is by file
-/// mtime, so a reopen keeps its own tail fresh.
-fn prune_device_cache(device_directory: &Path) {
-    let Ok(entries) = fs::read_dir(device_directory) else {
-        return;
-    };
-    let mut files: Vec<(PathBuf, SystemTime)> = entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            if !metadata.is_file() {
-                return None;
-            }
-            Some((
-                entry.path(),
-                metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            ))
-        })
-        .collect();
-    if files.len() <= MAX_SESSIONS_PER_DEVICE {
-        return;
-    }
-    files.sort_by_key(|(_, modified)| *modified);
-    let excess = files.len() - MAX_SESSIONS_PER_DEVICE;
-    for (path, _) in files.into_iter().take(excess) {
-        let _ = fs::remove_file(path);
-    }
-}
-
 fn session_cache_root(app: &AppHandle) -> Result<PathBuf, String> {
     let config = app
         .path()
@@ -195,9 +154,7 @@ pub(crate) fn write_session_cache(
 ) -> Result<(), String> {
     let root = session_cache_root(&app)?;
     let path = session_cache_file(&root, &device_id, &session_id)?;
-    write_cache_file(&path, &payload)?;
-    prune_device_cache(&root.join(&device_id));
-    Ok(())
+    write_cache_file(&path, &payload)
 }
 
 #[tauri::command]
@@ -300,36 +257,6 @@ mod tests {
         assert!(read_cache_file(&link).is_err());
         assert!(write_cache_file(&link, "{}").is_err());
         assert!(delete_cache_file(&link).is_err());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn prune_keeps_only_the_newest_sessions_per_device() {
-        let root = cache_test_root("prune");
-        let device_directory = root.join("device-1");
-        ensure_private_directory(&device_directory).unwrap();
-        for index in 0..(MAX_SESSIONS_PER_DEVICE + 3) {
-            let path =
-                session_cache_file(&root, "device-1", &format!("session-{index:02}")).unwrap();
-            write_cache_file(&path, "{}").unwrap();
-            // Distinct mtimes even on fast filesystems.
-            let stamp = SystemTime::UNIX_EPOCH
-                + std::time::Duration::from_secs(index as u64 + 1_700_000_000);
-            fs::File::options()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(stamp)
-                .unwrap();
-        }
-        prune_device_cache(&device_directory);
-        let remaining: Vec<String> = fs::read_dir(&device_directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(remaining.len(), MAX_SESSIONS_PER_DEVICE);
-        assert!(!remaining.contains(&"session-00.json".to_owned()));
-        assert!(remaining.contains(&format!("session-{:02}.json", MAX_SESSIONS_PER_DEVICE + 2)));
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -8,11 +8,8 @@ const LEGACY_PERSISTENCE_SETTING = "pihub-session-cache-enabled";
 const LEGACY_PROJECT_STATE_PREFIX = "pihub-collapsed:";
 const LEGACY_PERSIST_PREFIX = "pihub-session-v2:";
 const LEGACY_PERSIST_INDEX_KEY = "pihub-session-v2:index";
-const MAX_PERSIST_MESSAGES = 120;
-// Persisted tails are written to per-device folders on disk, so the old
-// localStorage quota cliff is gone; the per-block bound stays to keep any
-// single cached session (and the in-memory copy) at a sane size.
-const MAX_PERSIST_BLOCK_CHARS = 8_000;
+// Persisted sessions are written to per-device folders on disk, so the old
+// localStorage quota cliff is gone; every opened session is persisted in full.
 const persistTimers = new Map<string, number>();
 let legacyCleanup: Promise<void> | null = null;
 
@@ -28,9 +25,9 @@ function remember(key: string, detail: SessionDetail): void {
 }
 
 /**
- * Sessions are append-only JSONL on the server, so a persisted tail plus the
- * `after` cursor turns every reopen into an incremental top-up. Only a bounded
- * tail is stored: no streaming placeholders, no base64 image payloads.
+ * Sessions are append-only JSONL on the server, so a persisted copy plus the
+ * `after` cursor turns every reopen into an incremental top-up. The full
+ * message list is stored; only streaming/optimistic placeholders are skipped.
  */
 function persistableDetail(detail: SessionDetail): SessionDetail | null {
   const context = detail.context;
@@ -39,76 +36,21 @@ function persistableDetail(detail: SessionDetail): SessionDetail | null {
   for (let index = 0; index < context.messages.length; index += 1) {
     const message = context.messages[index];
     if (message.pihubStreaming || message.pihubOptimistic) continue;
-    pairs.push({ message: boundBlockSizes(stripImagePayloads(message)), entryId: context.entryIds[index] });
+    pairs.push({ message, entryId: context.entryIds[index] });
   }
-  const tail = pairs.slice(-MAX_PERSIST_MESSAGES);
-  if (!tail.length) return null;
+  if (!pairs.length) return null;
   return {
     ...detail,
     context: {
       ...context,
-      messages: tail.map((pair) => pair.message),
-      entryIds: tail.map((pair) => pair.entryId) as string[],
-      // The tail is only a partial window when the live context already was
-      // one, or when the tail had to drop older messages.
-      truncated: (context.truncated ?? false) || tail.length < pairs.length,
+      messages: pairs.map((pair) => pair.message),
+      entryIds: pairs.map((pair) => pair.entryId) as string[],
+      // The persisted copy is only a partial window when the live context
+      // already was one.
+      truncated: context.truncated ?? false,
       totalMessages: Math.max(context.totalMessages ?? 0, context.messages.length),
     },
   };
-}
-
-function stripImagePayloads(message: SessionMessage): SessionMessage {
-  if (!Array.isArray(message.content)) return message;
-  let changed = false;
-  const content = (message.content as Array<Record<string, unknown>>).map((block) => {
-    if (!block || block.type !== "image") return block;
-    changed = true;
-    const next = { ...block };
-    delete next.data;
-    if (next.source && typeof next.source === "object") {
-      const source = { ...(next.source as Record<string, unknown>) };
-      delete source.data;
-      next.source = source;
-    }
-    return next;
-  });
-  return changed ? { ...message, content } : message;
-}
-
-function boundString(value: unknown): unknown {
-  return typeof value === "string" && value.length > MAX_PERSIST_BLOCK_CHARS
-    ? `${value.slice(0, MAX_PERSIST_BLOCK_CHARS)}…`
-    : value;
-}
-
-function boundBlockSizes(message: SessionMessage): SessionMessage {
-  if (!Array.isArray(message.content)) return message;
-  let changed = false;
-  const content = (message.content as Array<Record<string, unknown>>).map((block) => {
-    if (!block || typeof block !== "object") return block;
-    let next: Record<string, unknown> | null = null;
-    for (const field of ["text", "thinking", "output"] as const) {
-      const source: Record<string, unknown> = next ?? block;
-      const bounded = boundString(source[field]);
-      if (bounded !== source[field]) {
-        next = { ...source, [field]: bounded };
-        changed = true;
-      }
-    }
-    for (const field of ["input", "arguments"] as const) {
-      const source: Record<string, unknown> = next ?? block;
-      const raw = source[field];
-      if (raw !== undefined && typeof raw !== "string") {
-        const serialized = JSON.stringify(raw) ?? "";
-        if (serialized.length > MAX_PERSIST_BLOCK_CHARS) {
-          next = { ...source, [field]: { pihubPersistTruncated: true, preview: serialized.slice(0, MAX_PERSIST_BLOCK_CHARS) } };
-          changed = true;
-        }
-      }
-    }
-    return next ?? block;
-  });
-  return changed ? { ...message, content } : message;
 }
 
 function splitCacheKey(key: string): { deviceId: string; sessionId: string } | null {
