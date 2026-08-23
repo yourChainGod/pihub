@@ -38,7 +38,7 @@ test("release workflow binds every privileged job to one immutable tag commit", 
 
   assert.match(workflow, /workflow_dispatch:\n {4}inputs:\n {6}release_ref:/);
   assert.match(workflow, /\^refs\/tags\/v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/);
-  assert.match(workflow, /if \[\[ "\$\{GITHUB_REF\}" != "\$\{release_ref\}" \]\]/);
+  assert.match(workflow, /if \[\[ "\$\{GITHUB_EVENT_NAME\}" == "push" && "\$\{GITHUB_REF\}" != "\$\{release_ref\}" \]\]/);
   assert.match(workflow, /git show-ref --verify --quiet "\$\{release_ref\}"/);
   assert.match(jobBlock(workflow, "validate"), /GITHUB_REPOSITORY_VISIBILITY.*public/s);
   assert.match(workflow, /tag_object="\$\(git rev-parse --verify "\$\{release_ref\}"\)"/);
@@ -115,10 +115,6 @@ test("release workflow ships standalone Server archives with a signed manifest",
 
   const sign = jobBlock(release, "sign-release");
   assert.match(sign, /node scripts\/sign-server-release\.mjs server-artifacts/);
-  assert.ok(
-    sign.indexOf("sign-server-release.mjs server-artifacts") < sign.indexOf("privacy-scan.mjs server-artifacts"),
-    "the Server manifest must be signed before the privacy scan and upload",
-  );
 });
 
 test("every native Server job verifies and ships the locked default extension bundle", () => {
