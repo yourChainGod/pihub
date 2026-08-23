@@ -126,7 +126,7 @@ export async function addDefaultExtensionFixture(serverRoot, { version } = {}) {
   const sharpRoot = packageDirectory(extensionRoot, "sharp");
   writeJson(path.join(sharpRoot, "package.json"), {
     name: "sharp",
-    version: "0.34.5",
+    version: "0.35.3",
     license: "Apache-2.0",
     scripts: { install: "node install/check.js || npm run build" },
   });

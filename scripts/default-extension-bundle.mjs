@@ -13,7 +13,7 @@ const repositoryRoot = path.resolve(import.meta.dirname, "..");
 export const DEFAULT_EXTENSION_SOURCE_DIRECTORY = path.join(repositoryRoot, "extensions");
 export const DEFAULT_EXTENSION_NOTICE_FILE = "THIRD_PARTY_NOTICES.extensions.txt";
 export const DEFAULT_EXTENSION_INVENTORY_SCHEMA_VERSION = 1;
-export const DEFAULT_EXTENSION_LOCK_SHA256 = "882ee2987abd4aecab3ca726390024e31e24436816bf1dd6caab8bbe4449a5d0";
+export const DEFAULT_EXTENSION_LOCK_SHA256 = "073459426c243c34c5787e10b9f7bc050f7b2b714bfc9ffd404af0e345729bb4";
 export const DEFAULT_EXTENSION_PACKAGES = Object.freeze([
   Object.freeze({ name: "@cortexkit/pi-magic-context", version: "0.38.0" }),
   Object.freeze({ name: "pi-todo-rail", version: "0.2.3" }),
@@ -103,9 +103,8 @@ const ALLOWED_PHYSICAL_INSTALL_SCRIPTS = new Map([
   // executed because staging uses --ignore-scripts; allowing the exact pin
   // keeps the bundle self-contained without permitting a network lifecycle.
   ["onnxruntime-node", "1.24.3"],
-  // Sharp's install check only selects its already-published platform binary;
-  // lifecycle execution remains disabled while staging.
-  ["sharp", "0.34.5"],
+  // sharp >= 0.35 no longer ships an install script; it selects its
+  // already-published platform binary purely through optional dependencies.
 ]);
 const AUDITED_PRIVACY_FINDINGS = new Map([
   [
@@ -436,16 +435,31 @@ function satisfiesSupportedRange(version, range) {
   return compareVersion(candidate, parseVersion(range, "Pi peer range")) === 0;
 }
 
+function exactOverrides(value) {
+  return value === undefined
+    || (isRecord(value)
+      && Object.values(value).every((version) => typeof version === "string"
+        && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(version)));
+}
+
 function validateManifest(manifest, expectedVersion) {
   if (!isRecord(manifest)
-      || !hasExactKeys(manifest, ["name", "version", "private", "engines", "dependencies"])
+      || !hasExactKeys(manifest, [
+        "name",
+        "version",
+        "private",
+        "engines",
+        "dependencies",
+        ...(manifest.overrides !== undefined ? ["overrides"] : []),
+      ])
       || manifest.name !== "@pihub/default-extensions"
       || manifest.version !== expectedVersion
       || manifest.private !== true
       || manifest.scripts !== undefined
       || !hasExactKeys(manifest.engines, ["node"])
       || manifest.engines.node !== EXPECTED_NODE_ENGINE
-      || !exactDependencies(manifest.dependencies)) {
+      || !exactDependencies(manifest.dependencies)
+      || !exactOverrides(manifest.overrides)) {
     throw new Error("Default extension package manifest contract is invalid");
   }
 }

@@ -46,7 +46,7 @@ async function bundleFixture(t) {
 
 test("committed default extension manifest and lock pin the exact audited registry graph", () => {
   const result = verifyDefaultExtensionSource({ expectedVersion: EXTENSIONS_VERSION });
-  assert.equal(result.lockSummary.externalEntries, 343);
+  assert.equal(result.lockSummary.externalEntries, 345);
   assert.equal(result.lockSummary.productionDependencies, 7);
   assert.equal(result.lockSummary.omittedPeerIntegrityEntries, 6);
   assert.equal(result.lockSummary.linkEntries, 0);
