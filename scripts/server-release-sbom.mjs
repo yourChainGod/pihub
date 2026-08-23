@@ -147,7 +147,8 @@ function isNpmPackageTreePath(relative) {
 function componentIdentity(component) {
   // `scope` (optional/required) is per-tree metadata: the same package can be
   // optional in the Server tree and required in the extension tree.
-  const { scope: _scope, ...rest } = component;
+  const rest = { ...component };
+  delete rest.scope;
   return canonicalize({
     ...rest,
     properties: component.properties.filter((property) => property?.name !== PACKAGE_PATH_PROPERTY),
