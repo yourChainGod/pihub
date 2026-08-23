@@ -389,10 +389,16 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     if (immediate) {
       detailRef.current = immediate; setDetail(immediate); setDetailLoading(false);
       if (!hydratedSessionsRef.current.has(key)) {
-        hydratedSessionsRef.current.add(key);
         // Incremental catch-up forward, then silently backfill older history.
+        // Only mark hydrated after a successful fetch: a failed one (device
+        // unreachable mid-restart) must not pin the stale cache for the rest
+        // of the app's lifetime.
         void refreshDetail(device, selectedId, true, 120, true)
-          .then(() => backfillHistory(device, selectedId));
+          .then((result) => {
+            if (!result) return;
+            hydratedSessionsRef.current.add(key);
+            void backfillHistory(device, selectedId);
+          });
       }
       return;
     }
@@ -401,13 +407,19 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
       if (!alive || selectedIdRef.current !== selectedId) return;
       if (cached) {
         detailRef.current = cached; setDetail(cached); setDetailLoading(false);
-        hydratedSessionsRef.current.add(key);
         void refreshDetail(device, selectedId, true, 120, true)
-          .then(() => backfillHistory(device, selectedId));
+          .then((result) => {
+            if (!result) return;
+            hydratedSessionsRef.current.add(key);
+            void backfillHistory(device, selectedId);
+          });
       } else {
-        hydratedSessionsRef.current.add(key);
         void refreshDetail(device, selectedId)
-          .then(() => backfillHistory(device, selectedId));
+          .then((result) => {
+            if (!result) return;
+            hydratedSessionsRef.current.add(key);
+            void backfillHistory(device, selectedId);
+          });
       }
     });
     return () => { alive = false; };
