@@ -23,7 +23,9 @@ export const RELAY_REQUEST_TIMEOUT_MS = 30_000;
 /** An unreferenced inbound transfer is discarded after this long. */
 export const RELAY_XFER_IDLE_TIMEOUT_MS = 5 * 60_000;
 
-const MAX_CONTROL_BYTES = 64 * 1024;
+// Envelopes carry inline bodies as base64, so the control cap must cover
+// RELAY_INLINE_LIMIT * 4/3 plus envelope headroom.
+const MAX_CONTROL_BYTES = 1024 * 1024 + 64 * 1024;
 const MAX_ID_LENGTH = 128;
 const MAX_HEADER_COUNT = 64;
 const MAX_HEADER_VALUE = 8 * 1024;
