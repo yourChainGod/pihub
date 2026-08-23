@@ -106,9 +106,24 @@ for (const metadataName of metadataFiles) {
   const metadata = JSON.parse(fs.readFileSync(path.join(directory, metadataName), "utf8"));
   exactKeys(
     metadata,
-    ["schemaVersion", "version", "platform", "arch", "filename", "sha256", "size", "sbom", "sbomSha256"],
+    ["schemaVersion", "version", "platform", "arch", "filename", "sha256", "size", "sbom", "sbomSha256", "pi", "extensions"],
     metadataName,
   );
+  // The pinned component manifest (pi + extensions) rides along in the asset
+  // descriptor; validate its shape so a swapped archive cannot smuggle an
+  // unlisted component set.
+  if (
+    !metadata.pi
+    || metadata.pi.name !== "@earendil-works/pi-coding-agent"
+    || !releaseProtocol.isReleaseVersion(metadata.pi.version)
+    || !Array.isArray(metadata.extensions)
+    || metadata.extensions.length === 0
+    || metadata.extensions.some((entry) => !entry
+      || typeof entry.name !== "string"
+      || !releaseProtocol.isReleaseVersion(entry.version))
+  ) {
+    throw new Error(`${metadataName} contains invalid component pins`);
+  }
   if (
     metadata.schemaVersion !== 1
     || !releaseProtocol.isReleaseVersion(metadata.version)
