@@ -72,7 +72,9 @@ jobs:
             echo "Release ref must be exactly refs/tags/vMAJOR.MINOR.PATCH" >&2
             exit 1
           fi
-          if [[ "${GITHUB_REF}" != "${release_ref}" ]]; then
+          # Tag pushes must run the workflow from the tag itself; a manual
+          # dispatch intentionally runs main's definition against the tag.
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" != "${release_ref}" ]]; then
             echo "The workflow definition and release source must come from the same tag ref" >&2
             exit 1
           fi
