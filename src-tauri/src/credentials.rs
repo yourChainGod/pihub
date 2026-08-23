@@ -259,9 +259,48 @@ pub(crate) struct PairingClaimResponse {
     authentication: AuthenticationMetadata,
 }
 
+/// When a relay node is added on a desktop that already paired the same
+/// machine over Tailscale, clone that identity onto the relay origin instead
+/// of claiming a second device id: sessions are owned per device id, so a
+/// fresh identity would see an empty workspace.
+fn is_tailscale_twin(origin: &str, node_id: &str) -> bool {
+    url::Url::parse(origin)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            crate::transport::is_tailscale_host(&host) && host.starts_with(&format!("{node_id}."))
+        })
+}
+
+async fn clone_tailnet_identity_for_relay(
+    base: &url::Url,
+    node_id: &str,
+) -> Result<Option<CredentialStatus>, String> {
+    let store = tokio::task::spawn_blocking(read_merged_store_from_keyring)
+        .await
+        .map_err(|_| "系统凭据读取任务异常结束".to_owned())??;
+    let twin = store
+        .values()
+        .find(|credential| is_tailscale_twin(&credential.origin, node_id));
+    let Some(twin) = twin else { return Ok(None) };
+    let mut credential = twin.clone();
+    credential.origin = canonical_origin(base);
+    store_credential(credential).await?;
+    let refreshed = load_credential(base).await?;
+    return Ok(Some(CredentialStatus {
+        paired: refreshed.is_some(),
+        device_id: refreshed.map(|item| item.device_id),
+    }));
+}
+
 #[tauri::command]
 pub(crate) async fn pair_device(url: String, code: String) -> Result<CredentialStatus, String> {
     let base = validate_tailnet_url(&url)?;
+    if let DeviceTransport::Relay { node_id } = resolve_device_transport(&base) {
+        if let Some(status) = clone_tailnet_identity_for_relay(&base, &node_id).await? {
+            return Ok(status);
+        }
+    }
     if !code.starts_with("pihub-") || !is_base64url(&code[6..], 43) {
         return Err("配对码格式无效".into());
     }
@@ -477,5 +516,19 @@ mod relay_token_tests {
         assert!(!super::valid_relay_token(&"A".repeat(300)));
         assert!(!super::valid_relay_token(&format!("{}=", "A".repeat(40))));
         assert!(!super::valid_relay_token(&format!("{} with space", "A".repeat(32))));
+    }
+}
+
+#[cfg(test)]
+mod twin_tests {
+    #[test]
+    fn tailnet_twin_matches_only_the_same_node_hostname() {
+        use super::is_tailscale_twin;
+        assert!(is_tailscale_twin("https://dgn-01.tailb5817b.ts.net:30141", "dgn-01"));
+        assert!(is_tailscale_twin("https://dgn-01.tailb5817b.ts.net", "dgn-01"));
+        assert!(!is_tailscale_twin("https://dgn-01.nodes.ffuu.eu.org", "dgn-01"));
+        assert!(!is_tailscale_twin("https://dgn-011.tailb5817b.ts.net", "dgn-01"));
+        assert!(!is_tailscale_twin("https://other.tailb5817b.ts.net", "dgn-01"));
+        assert!(!is_tailscale_twin("not a url", "dgn-01"));
     }
 }
