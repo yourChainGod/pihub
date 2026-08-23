@@ -5,9 +5,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::transport::{
-    canonical_origin, is_base64url, local_unix_seconds, response_bytes_limited, send_plain,
-    validate_authentication_metadata, validate_tailnet_url, AuthenticatedRequestSpec,
-    AuthenticationMetadata, MAX_AUTH_RESPONSE_BYTES, MAX_CLOCK_OFFSET_SECONDS,
+    canonical_origin, is_base64url, local_unix_seconds, resolve_device_transport,
+    response_bytes_limited, send_plain, validate_authentication_metadata, validate_tailnet_url,
+    AuthenticatedRequestSpec, AuthenticationMetadata, DeviceTransport, MAX_AUTH_RESPONSE_BYTES,
+    MAX_CLOCK_OFFSET_SECONDS,
 };
 
 pub(crate) const PIHUB_KEYRING_SERVICE: &str = "io.github.yourchaingod.pihub.desktop.auth.v1";
@@ -21,6 +22,9 @@ pub(crate) const PIHUB_CREDENTIAL_VERSION: u8 = 1;
 /// usernames, which remain as the lazy-migration fallback.
 pub(crate) const MERGED_STORE_USERNAME: &str = "devices-v2";
 pub(crate) const MERGED_STORE_VERSION: u8 = 1;
+/// Keychain username for the shared relay transport token (NATS account). The
+/// token is transport-level only — end-to-end HMAC still gates every request.
+pub(crate) const RELAY_TOKEN_USERNAME: &str = "relay-transport";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StoredCredential {
@@ -273,9 +277,21 @@ pub(crate) async fn pair_device(url: String, code: String) -> Result<CredentialS
     )?
     .accepting("application/json");
     let local_sent = local_unix_seconds()?;
-    let response = send_plain(&base, &spec).await?;
+    let (status, body) = match resolve_device_transport(&base) {
+        DeviceTransport::Tailnet => {
+            let response = send_plain(&base, &spec).await?;
+            let (status, body) = response_bytes_limited(response, MAX_AUTH_RESPONSE_BYTES).await?;
+            (status, body)
+        }
+        DeviceTransport::Relay { .. } => {
+            let response =
+                crate::relay::send_relay_unsigned(&base, &spec, MAX_AUTH_RESPONSE_BYTES).await?;
+            let status = reqwest::StatusCode::from_u16(response.status)
+                .map_err(|_| "Relay 响应状态码无效".to_owned())?;
+            (status, response.body.to_vec())
+        }
+    };
     let local_received = local_unix_seconds()?;
-    let (status, body) = response_bytes_limited(response, MAX_AUTH_RESPONSE_BYTES).await?;
     if !status.is_success() {
         return Err(match status {
             reqwest::StatusCode::UNAUTHORIZED => "配对码无效或已使用".into(),
@@ -312,6 +328,52 @@ pub(crate) async fn credential_status(url: String) -> Result<CredentialStatus, S
     Ok(CredentialStatus {
         paired: credential.is_some(),
         device_id: credential.map(|item| item.device_id),
+    })
+}
+
+pub(crate) fn load_relay_token() -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(PIHUB_KEYRING_SERVICE, RELAY_TOKEN_USERNAME)
+        .map_err(|_| "无法访问系统凭据存储")?;
+    match entry.get_password() {
+        Ok(token) => Ok(Some(token)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err("无法读取系统凭据，请检查系统钥匙串或凭据管理器".into()),
+    }
+}
+
+fn valid_relay_token(token: &str) -> bool {
+    token.len() >= 32
+        && token.len() <= 256
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+#[tauri::command]
+pub(crate) fn set_relay_token(token: String) -> Result<(), String> {
+    let trimmed = token.trim();
+    if !valid_relay_token(trimmed) {
+        return Err("Relay token 格式无效".into());
+    }
+    let entry = keyring::Entry::new(PIHUB_KEYRING_SERVICE, RELAY_TOKEN_USERNAME)
+        .map_err(|_| "无法访问系统凭据存储")?;
+    entry
+        .set_password(trimmed)
+        .map_err(|_| "无法将 Relay token 写入系统凭据存储".to_owned())?;
+    crate::relay::invalidate_relay_client();
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RelayTokenStatus {
+    configured: bool,
+}
+
+#[tauri::command]
+pub(crate) fn relay_token_status() -> Result<RelayTokenStatus, String> {
+    Ok(RelayTokenStatus {
+        configured: load_relay_token()?.is_some(),
     })
 }
 
@@ -402,5 +464,18 @@ mod tests {
             LEGACY_DESKTOP_BUNDLE_IDENTIFIER
         );
         assert_ne!(PIHUB_KEYRING_SERVICE, LEGACY_DESKTOP_KEYRING_SERVICE);
+    }
+}
+
+#[cfg(test)]
+mod relay_token_tests {
+    #[test]
+    fn relay_token_validation_is_strict() {
+        assert!(super::valid_relay_token(&"A".repeat(43)));
+        assert!(super::valid_relay_token(&format!("{}-_", "a".repeat(40))));
+        assert!(!super::valid_relay_token("short"));
+        assert!(!super::valid_relay_token(&"A".repeat(300)));
+        assert!(!super::valid_relay_token(&format!("{}=", "A".repeat(40))));
+        assert!(!super::valid_relay_token(&format!("{} with space", "A".repeat(32))));
     }
 }

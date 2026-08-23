@@ -32,6 +32,8 @@ base64 = "0.22"
 bytes = "1"
 getrandom = "0.3"
 hmac = "0.12"
+async-nats = { version = "0.50", default-features = false, features = ["websockets", "ring", "server_2_10"] }
+futures-util = { version = "0.3", default-features = false }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 minisign-verify = "=0.2.5"
 semver = "=1.0.28"

@@ -5,6 +5,7 @@ mod devices;
 mod discovery;
 mod files;
 mod resource_cache;
+mod relay;
 mod session_cache;
 mod setup;
 mod streaming;
@@ -79,6 +80,8 @@ pub fn run() {
             credentials::pair_device,
             credentials::credential_status,
             credentials::forget_device_credential,
+            credentials::set_relay_token,
+            credentials::relay_token_status,
             discovery::probe_device,
             discovery::discover_tailscale,
             setup::bootstrap_tailnet_peer,

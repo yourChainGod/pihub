@@ -35,6 +35,12 @@ pub(crate) const MAX_CLOCK_OFFSET_SECONDS: i64 = 24 * 60 * 60;
 pub(crate) const PIHUB_AUTH_SCHEME: &str = "PiHub-HMAC-SHA256";
 pub(crate) const PIHUB_SIGNING_CONTEXT: &str = "pihub-request-v3";
 pub(crate) const PIHUB_CONTENT_SHA256_HEADER: &str = "x-pihub-content-sha256";
+/// Virtual HTTPS origin suffix for relay-transported devices: a device whose
+/// URL host is `<nodeId>.nodes.ffuu.eu.org` is reached through the NATS relay
+/// (wss://relay.ffuu.eu.org) instead of a direct Tailscale Serve connection.
+/// The URL is an addressing/identity construct only — no HTTP is ever sent to
+/// it. The suffix must stay in sync with server/lib/relay-protocol.ts.
+pub(crate) const RELAY_NODES_SUFFIX: &str = ".nodes.ffuu.eu.org";
 pub(crate) const PATH_COMPONENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'!')
@@ -108,6 +114,38 @@ pub(crate) fn is_tailscale_host(host: &str) -> bool {
         return true;
     }
     normalized.parse::<IpAddr>().is_ok_and(is_tailscale_ip)
+}
+
+/// Relay node ids follow server/lib/relay-protocol.ts NODE_ID_PATTERN:
+/// ^[a-z0-9][a-z0-9-]{0,62}$ — the NATS subject layout depends on it.
+pub(crate) fn valid_relay_node_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (index > 0 && byte == b'-')
+        })
+}
+
+/// Extract the node id from a relay device host (`<nodeId>.nodes.ffuu.eu.org`).
+pub(crate) fn relay_node_id_from_host(host: &str) -> Option<String> {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    let prefix = normalized.strip_suffix(RELAY_NODES_SUFFIX)?;
+    valid_relay_node_id(prefix).then(|| prefix.to_owned())
+}
+
+/// How a device URL is reached. Relay URLs are virtual origins; every byte
+/// still travels inside the signed envelope over the NATS relay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DeviceTransport {
+    Tailnet,
+    Relay { node_id: String },
+}
+
+pub(crate) fn resolve_device_transport(base: &url::Url) -> DeviceTransport {
+    base.host_str()
+        .and_then(relay_node_id_from_host)
+        .map(|node_id| DeviceTransport::Relay { node_id })
+        .unwrap_or(DeviceTransport::Tailnet)
 }
 
 pub(crate) fn validate_percent_encoding(value: &str) -> Result<(), String> {
@@ -495,8 +533,20 @@ pub(crate) fn validate_tailnet_url(value: &str) -> Result<url::Url, String> {
         return Err("设备地址只能使用根路径".into());
     }
     let host = parsed.host_str().ok_or("设备地址缺少主机名")?;
+    if relay_node_id_from_host(host).is_some() {
+        // Relay device: virtual origin addressed through the NATS relay. It
+        // never receives direct HTTP; all other shape checks above still apply.
+        return Ok(parsed);
+    }
+    if host
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+        .ends_with(RELAY_NODES_SUFFIX)
+    {
+        return Err("Relay 节点地址的节点标识无效".into());
+    }
     if !is_tailscale_host(host) {
-        return Err("只允许 Tailscale IP 或 MagicDNS (.ts.net) 地址".into());
+        return Err("只允许 Tailscale IP、MagicDNS (.ts.net) 或 PiHub Relay 节点地址".into());
     }
     Ok(parsed)
 }
@@ -868,10 +918,10 @@ pub(crate) fn authorization_value(
     ))
 }
 
-pub(crate) fn authorization_header(
+pub(crate) fn authorization_string(
     spec: &AuthenticatedRequestSpec,
     credential: &StoredCredential,
-) -> Result<reqwest::header::HeaderValue, String> {
+) -> Result<String, String> {
     let timestamp = local_unix_seconds()?
         .checked_add(credential.clock_offset_seconds)
         .filter(|timestamp| *timestamp >= 0)
@@ -879,11 +929,82 @@ pub(crate) fn authorization_header(
     let mut nonce_bytes = [0u8; 18];
     getrandom::fill(&mut nonce_bytes).map_err(|_| "无法生成安全请求随机数".to_owned())?;
     let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
-    let value = authorization_value(spec, credential, timestamp, &nonce)?;
+    authorization_value(spec, credential, timestamp, &nonce)
+}
+
+pub(crate) fn authorization_header(
+    spec: &AuthenticatedRequestSpec,
+    credential: &StoredCredential,
+) -> Result<reqwest::header::HeaderValue, String> {
+    let value = authorization_string(spec, credential)?;
     let mut header = reqwest::header::HeaderValue::from_str(&value)
         .map_err(|_| "无法构造请求鉴权头".to_owned())?;
     header.set_sensitive(true);
     Ok(header)
+}
+
+/// The signed headers the relay path puts into the request envelope. Identical
+/// to the headers `authenticated_request` sets on the wire — the relay only
+/// transports them, the node's loopback server still verifies the signature.
+fn relay_signed_headers_at(
+    spec: &AuthenticatedRequestSpec,
+    credential: &StoredCredential,
+    timestamp: i64,
+    nonce: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut headers = vec![(
+        "authorization".to_owned(),
+        authorization_value(spec, credential, timestamp, nonce)?,
+    )];
+    if !matches!(spec.method, reqwest::Method::GET | reqwest::Method::HEAD) {
+        headers.push((
+            PIHUB_CONTENT_SHA256_HEADER.to_owned(),
+            spec.content_sha256.clone(),
+        ));
+    }
+    headers.extend(relay_unsigned_headers(spec));
+    Ok(headers)
+}
+
+pub(crate) fn relay_signed_headers(
+    spec: &AuthenticatedRequestSpec,
+    credential: &StoredCredential,
+) -> Result<Vec<(String, String)>, String> {
+    let timestamp = local_unix_seconds()?
+        .checked_add(credential.clock_offset_seconds)
+        .filter(|timestamp| *timestamp >= 0)
+        .ok_or_else(|| "校准后的签名时间超出范围".to_owned())?;
+    let mut nonce_bytes = [0u8; 18];
+    getrandom::fill(&mut nonce_bytes).map_err(|_| "无法生成安全请求随机数".to_owned())?;
+    let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+    relay_signed_headers_at(spec, credential, timestamp, &nonce)
+}
+
+/// Headers for unsigned relay requests (pairing claim, health probe).
+pub(crate) fn relay_unsigned_headers(spec: &AuthenticatedRequestSpec) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if let Some(content_type) = &spec.content_type {
+        headers.push(("content-type".to_owned(), content_type.clone()));
+    }
+    if let Some(accept) = spec.accept {
+        headers.push(("accept".to_owned(), accept.to_owned()));
+    }
+    if let Some(last_event_id) = spec.last_event_id {
+        headers.push(("last-event-id".to_owned(), last_event_id.to_string()));
+    }
+    headers
+}
+
+/// The (method, canonical path+query, body) triple carried by a relay request
+/// envelope. The path is the same canonical target the HMAC signature binds.
+pub(crate) fn relay_request_parts(
+    spec: &AuthenticatedRequestSpec,
+) -> Result<(String, String, Option<Bytes>), String> {
+    Ok((
+        spec.method.as_str().to_ascii_uppercase(),
+        canonical_request_target(&spec.endpoint)?,
+        spec.body.clone(),
+    ))
 }
 
 impl AuthenticatedRequestSpec {
@@ -918,6 +1039,12 @@ impl AuthenticatedRequestSpec {
             timeout: Some(timeout),
             last_event_id: None,
         })
+    }
+
+    /// The relay path enforces the budget itself (there is no reqwest client
+    /// timeout once the request is a NATS envelope).
+    pub(crate) fn timeout_budget(&self) -> Option<Duration> {
+        self.timeout
     }
 
     pub(crate) fn bytes(
@@ -1070,6 +1197,23 @@ pub(crate) struct HealthResponse {
     authentication: AuthenticationMetadata,
 }
 
+/// Shared by the tailnet and relay health probes: parse + validate the
+/// /api/health body and derive the clock offset from the measured round trip.
+pub(crate) fn validate_health_body(
+    body: &[u8],
+    local_sent: i64,
+    local_received: i64,
+) -> Result<(AuthenticationMetadata, i64), String> {
+    let health = serde_json::from_slice::<HealthResponse>(body)
+        .map_err(|_| "设备健康检查响应不是有效的 PiHub JSON".to_owned())?;
+    if health.status != "ok" {
+        return Err("设备健康检查未返回正常状态".into());
+    }
+    let offset =
+        validate_authentication_metadata(&health.authentication, local_sent, local_received)?;
+    Ok((health.authentication, offset))
+}
+
 pub(crate) async fn fetch_authentication_metadata(
     base: &url::Url,
 ) -> Result<(AuthenticationMetadata, i64), String> {
@@ -1086,14 +1230,7 @@ pub(crate) async fn fetch_authentication_metadata(
     if !status.is_success() {
         return Err(format!("设备健康检查返回 HTTP {status}"));
     }
-    let health = serde_json::from_slice::<HealthResponse>(&body)
-        .map_err(|_| "设备健康检查响应不是有效的 PiHub JSON".to_owned())?;
-    if health.status != "ok" {
-        return Err("设备健康检查未返回正常状态".into());
-    }
-    let offset =
-        validate_authentication_metadata(&health.authentication, local_sent, local_received)?;
-    Ok((health.authentication, offset))
+    validate_health_body(&body, local_sent, local_received)
 }
 
 pub(crate) async fn send_authenticated_attempt(
@@ -1185,7 +1322,13 @@ pub(crate) async fn inspect_pi_web(_client: &reqwest::Client, base_url: &str) ->
             error: Some("设备健康检查地址无效".into()),
         };
     };
-    let (metadata, offset) = match fetch_authentication_metadata(&base).await {
+    let relay = matches!(resolve_device_transport(&base), DeviceTransport::Relay { .. });
+    let metadata_result = if relay {
+        crate::relay::fetch_relay_authentication_metadata(&base).await
+    } else {
+        fetch_authentication_metadata(&base).await
+    };
+    let (metadata, offset) = match metadata_result {
         Ok(value) => value,
         Err(error) => {
             return DeviceStatus {
@@ -1246,14 +1389,28 @@ pub(crate) async fn inspect_pi_web(_client: &reqwest::Client, base_url: &str) ->
     let spec =
         AuthenticatedRequestSpec::empty(reqwest::Method::GET, endpoint, Duration::from_secs(12))
             .accepting("application/json");
-    match send_authenticated(&base, &spec).await {
-        Ok(response) if response.status().is_success() => {
-            let value = response.json::<Value>().await.ok();
-            if value
-                .as_ref()
-                .and_then(|item| item.pointer("/security/tailnetOnly"))
-                .and_then(Value::as_bool)
-                == Some(false)
+    let setup_result: Result<(u16, Option<Value>), String> = if relay {
+        crate::relay::send_relay_authenticated(&base, &spec, MAX_API_RESPONSE_BYTES)
+            .await
+            .map(|response| (response.status, serde_json::from_slice::<Value>(&response.body).ok()))
+    } else {
+        match send_authenticated(&base, &spec).await {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let value = response.json::<Value>().await.ok();
+                Ok((status, value))
+            }
+            Err(error) => Err(error),
+        }
+    };
+    match setup_result {
+        Ok((status, value)) if (200..300).contains(&status) => {
+            if !relay
+                && value
+                    .as_ref()
+                    .and_then(|item| item.pointer("/security/tailnetOnly"))
+                    .and_then(Value::as_bool)
+                    == Some(false)
             {
                 return DeviceStatus {
                     state: "offline".into(),
@@ -1274,11 +1431,11 @@ pub(crate) async fn inspect_pi_web(_client: &reqwest::Client, base_url: &str) ->
                 error: value.is_none().then(|| "服务状态响应不是标准 JSON".into()),
             }
         }
-        Ok(response) => DeviceStatus {
+        Ok((status, _)) => DeviceStatus {
             state: "offline".into(),
             latency_ms: None,
             version: None,
-            error: Some(format!("HTTP {}", response.status())),
+            error: Some(format!("HTTP {status}")),
         },
         Err(error) if error.starts_with("PIHUB_AUTH_") => DeviceStatus {
             state: "auth".into(),
@@ -1332,21 +1489,32 @@ pub(crate) async fn agegr_request(
     // drop idle pooled connections without an RST, so a pooled connection can
     // die mid-body), drop the cached client — and its whole pool — and retry
     // once on a fresh connection.
-    let response = send_authenticated(&base, &spec).await?;
-    let (status, bytes) =
-        match response_bytes_limited_named(response, MAX_API_RESPONSE_BYTES, "服务端 API 响应")
-            .await
-        {
-            Ok(done) => done,
-            Err(error) if idempotent => {
-                invalidate_tailnet_client(&base);
-                let retry = send_authenticated(&base, &spec).await?;
-                response_bytes_limited_named(retry, MAX_API_RESPONSE_BYTES, "服务端 API 响应")
-                    .await
-                    .map_err(|_| error)?
+    let (status, bytes) = match resolve_device_transport(&base) {
+        DeviceTransport::Tailnet => {
+            let response = send_authenticated(&base, &spec).await?;
+            match response_bytes_limited_named(response, MAX_API_RESPONSE_BYTES, "服务端 API 响应")
+                .await
+            {
+                Ok(done) => done,
+                Err(error) if idempotent => {
+                    invalidate_tailnet_client(&base);
+                    let retry = send_authenticated(&base, &spec).await?;
+                    response_bytes_limited_named(retry, MAX_API_RESPONSE_BYTES, "服务端 API 响应")
+                        .await
+                        .map_err(|_| error)?
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
-        };
+        }
+        DeviceTransport::Relay { .. } => {
+            let response =
+                crate::relay::send_relay_authenticated(&base, &spec, MAX_API_RESPONSE_BYTES)
+                    .await?;
+            let status = reqwest::StatusCode::from_u16(response.status)
+                .map_err(|_| "Relay 响应状态码无效".to_owned())?;
+            (status, response.body.to_vec())
+        }
+    };
     let value = if bytes.is_empty() {
         Value::Null
     } else {
@@ -1800,6 +1968,115 @@ mod tests {
             .build()
             .unwrap();
         assert!(!get.headers().contains_key(PIHUB_CONTENT_SHA256_HEADER));
+    }
+
+    #[test]
+    fn relay_transport_resolves_only_valid_node_origins() {
+        let relay = validate_tailnet_url("https://dgn-01.nodes.ffuu.eu.org").unwrap();
+        assert_eq!(
+            resolve_device_transport(&relay),
+            DeviceTransport::Relay {
+                node_id: "dgn-01".into()
+            }
+        );
+        let tailnet = validate_tailnet_url("https://device.example.ts.net:30141").unwrap();
+        assert_eq!(resolve_device_transport(&tailnet), DeviceTransport::Tailnet);
+        let ip = validate_tailnet_url("https://100.64.0.1:30141").unwrap();
+        assert_eq!(resolve_device_transport(&ip), DeviceTransport::Tailnet);
+
+        // The suffix alone never makes a valid relay URL — fail closed.
+        for rejected in [
+            "https://.nodes.ffuu.eu.org",
+            "https://-bad.nodes.ffuu.eu.org",
+            "https://bad-.nodes.ffuu.eu.org/x",
+            "https://evil.nodes.ffuu.eu.org.attacker.example",
+            "https://nodes.ffuu.eu.org",
+            "http://dgn-01.nodes.ffuu.eu.org",
+            "https://dgn-01.nodes.ffuu.eu.org:8443/path",
+        ] {
+            assert!(
+                validate_tailnet_url(rejected).is_err(),
+                "accepted {rejected}"
+            );
+        }
+        let too_long = format!("https://{}.nodes.ffuu.eu.org", "a".repeat(64));
+        assert!(validate_tailnet_url(&too_long).is_err());
+        assert!(validate_tailnet_url(&format!(
+            "https://{}.nodes.ffuu.eu.org",
+            "a".repeat(63)
+        ))
+        .is_ok());
+        // Uppercase hosts are normalized by the URL parser to a valid node id.
+        let upper = validate_tailnet_url("https://DGN-01.nodes.ffuu.eu.org").unwrap();
+        assert_eq!(
+            resolve_device_transport(&upper),
+            DeviceTransport::Relay {
+                node_id: "dgn-01".into()
+            }
+        );
+    }
+
+    #[test]
+    fn relay_signed_headers_match_the_v3_fixed_vector() {
+        let spec = AuthenticatedRequestSpec {
+            method: reqwest::Method::POST,
+            endpoint: url::Url::parse(
+                "https://pi.invalid/api/agent/new?z=2&name=hello%20world&a=%2F",
+            )
+            .unwrap(),
+            body: None,
+            content_type: Some("application/json".into()),
+            accept: Some("application/json"),
+            content_sha256: "9b2d43affbf49a367028df2e1414f84c0e099ac98c3d54a8a80157fd7771af25"
+                .into(),
+            timeout: Some(Duration::from_secs(30)),
+            last_event_id: None,
+        };
+        let headers = relay_signed_headers_at(
+            &spec,
+            &signing_credential(),
+            1_800_000_000,
+            &"C".repeat(22),
+        )
+        .unwrap();
+        assert_eq!(
+            headers,
+            vec![
+                (
+                    "authorization".to_owned(),
+                    "PiHub-HMAC-SHA256 dev_AAAAAAAAAAAAAAAAAAAAAA:1800000000:CCCCCCCCCCCCCCCCCCCCCC:GGGGGGGGGGGGGGGGGGGGGG:omu6JdCYA72o1I6Qmue5Hs_gtlj6b0X9SKnsR1bP0k4".to_owned(),
+                ),
+                (
+                    PIHUB_CONTENT_SHA256_HEADER.to_owned(),
+                    spec.content_sha256.clone(),
+                ),
+                ("content-type".to_owned(), "application/json".to_owned()),
+                ("accept".to_owned(), "application/json".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn relay_unsigned_headers_skip_auth_and_carry_last_event_id() {
+        let spec = AuthenticatedRequestSpec::empty(
+            reqwest::Method::GET,
+            url::Url::parse("https://dgn-01.nodes.ffuu.eu.org/api/agent/s1/events").unwrap(),
+            Duration::from_secs(30),
+        )
+        .accepting("text/event-stream")
+        .resuming_after(Some(41))
+        .without_timeout();
+        assert_eq!(
+            relay_unsigned_headers(&spec),
+            vec![
+                ("accept".to_owned(), "text/event-stream".to_owned()),
+                ("last-event-id".to_owned(), "41".to_owned()),
+            ]
+        );
+        let (method, path, body) = relay_request_parts(&spec).unwrap();
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/api/agent/s1/events");
+        assert!(body.is_none());
     }
 
     #[test]

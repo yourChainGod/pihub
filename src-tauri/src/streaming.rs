@@ -8,9 +8,69 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use crate::transport::{
-    send_authenticated, validate_tailnet_url, validated_api_endpoint, ApiAccess,
-    AuthenticatedRequestSpec,
+    resolve_device_transport, send_authenticated, validate_tailnet_url, validated_api_endpoint,
+    ApiAccess, AuthenticatedRequestSpec, DeviceTransport,
 };
+
+/// Chunk source shared by the two stream transports. A relay stream surfaces
+/// node stream-end exactly like a dropped SSE connection (Ok(None)); the
+/// decoder/reconnect semantics above stay identical.
+pub(crate) enum StreamChunks {
+    Http(reqwest::Response),
+    Relay(crate::relay::RelayStream),
+}
+
+impl StreamChunks {
+    async fn next_chunk(&mut self) -> Option<Result<bytes::Bytes, String>> {
+        match self {
+            Self::Http(response) => match response.chunk().await {
+                Ok(chunk) => chunk.map(Ok),
+                Err(error) => Some(Err(error.to_string())),
+            },
+            Self::Relay(stream) => stream.receiver.recv().await,
+        }
+    }
+}
+
+/// Open the byte source for an event stream on whichever transport the device
+/// URL selects. Ok(None) means the caller cancelled while connecting.
+async fn open_stream_chunks(
+    base: &url::Url,
+    spec: &AuthenticatedRequestSpec,
+    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+) -> Result<Option<StreamChunks>, String> {
+    match resolve_device_transport(base) {
+        DeviceTransport::Tailnet => {
+            let response = tokio::select! {
+                _ = cancel_rx => return Ok(None),
+                response = send_authenticated(base, spec) => response?,
+            };
+            if !response.status().is_success() {
+                return Err(format!("实时连接返回 HTTP {}", response.status()));
+            }
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if !content_type
+                .split(';')
+                .next()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
+            {
+                return Err("实时连接返回了错误的内容类型".into());
+            }
+            Ok(Some(StreamChunks::Http(response)))
+        }
+        DeviceTransport::Relay { .. } => {
+            let stream = tokio::select! {
+                _ = cancel_rx => return Ok(None),
+                stream = crate::relay::open_relay_stream(base, spec) => stream?,
+            };
+            Ok(Some(StreamChunks::Relay(stream)))
+        }
+    }
+}
 
 pub(crate) const MAX_SSE_BUFFER_BYTES: usize = 1024 * 1024;
 
@@ -441,33 +501,17 @@ pub(crate) async fn start_agent_stream(
     tauri::async_runtime::spawn(async move {
         let mut ready_tx = Some(ready_tx);
         let run: Result<(), String> = async {
-            let response = tokio::select! {
-                _ = &mut cancel_rx => return Ok(()),
-                response = send_authenticated(&task_base, &spec) => response?,
+            let Some(mut source) = open_stream_chunks(&task_base, &spec, &mut cancel_rx).await?
+            else {
+                return Ok(());
             };
-            if !response.status().is_success() {
-                return Err(format!("实时连接返回 HTTP {}", response.status()));
-            }
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("");
-            if !content_type
-                .split(';')
-                .next()
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
-            {
-                return Err("实时连接返回了错误的内容类型".into());
-            }
-            let mut response = response;
             let mut decoder = SseDecoder::default();
             loop {
-                let chunk = tokio::select! {
+                let next = tokio::select! {
                     _ = &mut cancel_rx => return Ok(()),
-                    chunk = response.chunk() => chunk.map_err(|error| error.to_string())?,
+                    next = source.next_chunk() => next,
                 };
-                let Some(chunk) = chunk else {
+                let Some(chunk) = next else {
                     for event in decoder.finish()? {
                         if !emit_agent_stream_event(
                             &app,
@@ -484,6 +528,7 @@ pub(crate) async fn start_agent_stream(
                     }
                     return Err("实时连接已关闭".into());
                 };
+                let chunk = chunk?;
                 for event in decoder.push(&chunk)? {
                     if !emit_agent_stream_event(&app, &task_key, generation, event, &mut ready_tx)?
                     {
@@ -619,37 +664,26 @@ pub(crate) async fn start_terminal_stream(
     let task_base = base.clone();
     tauri::async_runtime::spawn(async move {
         let mut ready_tx = Some(ready_tx);
+        let relay_mode = matches!(resolve_device_transport(&task_base), DeviceTransport::Relay { .. });
         let run: Result<(), String> = async {
-            let response = tokio::select! {
-                _ = &mut cancel_rx => return Ok(()),
-                response = send_authenticated(&task_base, &spec) => response?,
+            let Some(mut source) = open_stream_chunks(&task_base, &spec, &mut cancel_rx).await?
+            else {
+                return Ok(());
             };
-            if !response.status().is_success() {
-                return Err(format!("实时连接返回 HTTP {}", response.status()));
+            if relay_mode {
+                // The relay path has no response headers to inspect; the first
+                // frame (or a stream-end error) follows on the channel.
+                if let Some(sender) = ready_tx.take() {
+                    let _ = sender.send(Ok(()));
+                }
             }
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("");
-            if !content_type
-                .split(';')
-                .next()
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
-            {
-                return Err("实时连接返回了错误的内容类型".into());
-            }
-            if let Some(sender) = ready_tx.take() {
-                let _ = sender.send(Ok(()));
-            }
-            let mut response = response;
             let mut decoder = SseDecoder::default();
             loop {
-                let chunk = tokio::select! {
+                let next = tokio::select! {
                     _ = &mut cancel_rx => return Ok(()),
-                    chunk = response.chunk() => chunk.map_err(|error| error.to_string())?,
+                    next = source.next_chunk() => next,
                 };
-                let Some(chunk) = chunk else {
+                let Some(chunk) = next else {
                     for event in decoder.finish()? {
                         if !emit_terminal_stream_event(
                             &app,
@@ -663,6 +697,7 @@ pub(crate) async fn start_terminal_stream(
                     }
                     return Err("实时连接已关闭".into());
                 };
+                let chunk = chunk?;
                 for event in decoder.push(&chunk)? {
                     if !emit_terminal_stream_event(
                         &app,
