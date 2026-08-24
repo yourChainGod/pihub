@@ -279,24 +279,26 @@ function DeviceCard({ device, status, paired, onOpen, onRefresh, onPair, onUnpai
   }, [menu]);
   return (
     <article className={`device-card${menu ? " menu-open" : ""}`} style={{ "--accent": device.accent } as React.CSSProperties}>
-      <div className="device-icon"><PiHubDeviceIcon os={device.os} size={20} /><span className={`state-indicator ${state}`} /></div>
-      <div className="card-body">
-        <h3>{device.name}</h3>
-        <div className="host"><span>{isRelayDevice(device) ? "RELAY" : device.source === "tailscale" ? "TAILSCALE" : "直连"}</span>{device.host}</div>
+      <div className="card-top">
+        <div className="device-icon"><PiHubDeviceIcon os={device.os} size={20} /><span className={`state-indicator ${state}`} /></div>
+        <div className="card-body">
+          <h3>{device.name}</h3>
+          <div className="host"><span>{isRelayDevice(device) ? "RELAY" : device.source === "tailscale" ? "TAILSCALE" : "直连"}</span>{device.host}</div>
+        </div>
+        <div className="card-actions">
+          <button className="tiny-button" onClick={onRefresh} disabled={state === "checking"} aria-label={`刷新 ${device.name} 状态`}><RefreshCw size={15} className={state === "checking" ? "spin" : undefined} /></button>
+          <button className={`tiny-button ${device.favorite ? "active" : ""}`} onClick={onFavorite} aria-label={device.favorite ? "取消收藏" : "收藏设备"}><Heart size={15} fill={device.favorite ? "currentColor" : "none"} /></button>
+          <button className="tiny-button" onClick={() => setMenu(!menu)} aria-label="设备菜单" aria-expanded={menu}><MoreHorizontal size={17} /></button>
+          {menu && <div className="card-menu">
+            <button onClick={() => { setMenu(false); onEdit(); }}><Pencil size={14} />编辑设备</button>
+            {paired && <button onClick={() => { setMenu(false); onUnpair(); }}><Unlink size={14} />解除本机配对</button>}
+            <button className="danger" onClick={() => { setMenu(false); onDelete(); }}><Trash2 size={14} />移除设备</button>
+          </div>}
+        </div>
       </div>
-      <div className="card-side">
+      <div className="card-foot">
         <span className={`status-pill ${state}`}>{state === "online" ? "在线" : state === "auth" ? "待配对" : state === "checking" ? "检查中" : "离线"}</span>
         <span className="card-meta">{status?.latencyMs !== undefined ? `${status.latencyMs} ms` : "—"} · {status?.version ? `v${status.version.replace(/^v/, "")}` : "—"}</span>
-      </div>
-      <div className="card-actions">
-        <button className="tiny-button" onClick={onRefresh} disabled={state === "checking"} aria-label={`刷新 ${device.name} 状态`}><RefreshCw size={15} className={state === "checking" ? "spin" : undefined} /></button>
-        <button className={`tiny-button ${device.favorite ? "active" : ""}`} onClick={onFavorite} aria-label={device.favorite ? "取消收藏" : "收藏设备"}><Heart size={15} fill={device.favorite ? "currentColor" : "none"} /></button>
-        <button className="tiny-button" onClick={() => setMenu(!menu)} aria-label="设备菜单" aria-expanded={menu}><MoreHorizontal size={17} /></button>
-        {menu && <div className="card-menu">
-          <button onClick={() => { setMenu(false); onEdit(); }}><Pencil size={14} />编辑设备</button>
-          {paired && <button onClick={() => { setMenu(false); onUnpair(); }}><Unlink size={14} />解除本机配对</button>}
-          <button className="danger" onClick={() => { setMenu(false); onDelete(); }}><Trash2 size={14} />移除设备</button>
-        </div>}
       </div>
       <button className="connect-button" disabled={state === "offline" || state === "checking"} onClick={state === "auth" ? onPair : onOpen}>
         <span>{state === "offline" ? <WifiOff size={16} /> : state === "auth" ? <KeyRound size={16} /> : state === "checking" ? <LoaderCircle className="spin" size={16} /> : <Command size={16} />}{state === "offline" ? "设备不可达" : state === "auth" ? "配对设备" : state === "checking" ? "正在检查" : "打开工作台"}</span>
