@@ -1,3 +1,12 @@
+{
+	# Cloudflare dials origins over HTTP/2 with RFC 8441 extended CONNECT for
+	# WebSocket; without an Upgrade header to proxy, NATS rejects the
+	# handshake. HTTP/1.1-only keeps the classic Upgrade flow.
+	servers {
+		protocols h1
+	}
+}
+
 # PiHub relay entry: Cloudflare → Caddy (origin cert, Full Strict) → NATS websocket.
 # Caddy re-canonicalizes the Upgrade/Connection headers; Cloudflare's proxy
 # mangles them in a way NATS's strict handshake rejects.
@@ -5,3 +14,4 @@ relay.ffuu.eu.org {
 	tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
 	reverse_proxy pihub-relay-nats:8080
 }
+

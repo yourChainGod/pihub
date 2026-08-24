@@ -353,6 +353,8 @@ export async function createConnector(options: ConnectorOptions): Promise<Runnin
       });
       const body = Buffer.from(await response.arrayBuffer());
       await replyWithBody(message.reply, request, { status: response.status, headers, body });
+      // Replay visibility without secrets: method + route shape + status only.
+      logger.info(`connector: ${request.method} ${request.path.split("?")[0].replace(/[0-9a-f]{8}-[0-9a-f-]{20,}/g, "<id>")} → ${response.status} (${body.length}B)`);
     } catch (error) {
       failReply(502, `local replay failed: ${(error as Error).message}`.slice(0, 200));
     }

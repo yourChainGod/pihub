@@ -24,7 +24,7 @@ function fakeNats() {
     return pattern === subject;
   };
   const dispatch = (subject, data, reply) => {
-    for (const sub of subs) if (match(sub.subject, subject)) sub.callback({ subject, data, reply });
+    for (const sub of subs) if (match(sub.subject, subject)) sub.callback(null, { subject, data, reply });
   };
   const connection = {
     subscribe(subject, { callback }) {

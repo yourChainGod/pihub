@@ -37,7 +37,9 @@ export async function POST(
 
     const { session } = await startRpcSession(id, filePath, undefined, {
       ownerId: access.context.deviceId,
-      signal: req.signal,
+      // Deliberately NOT tied to req.signal: a client that disconnects while a
+      // session cold-starts (relay flap, laptop lid) must not abort the run —
+      // prompt submission is fire-and-forget, the idle reaper owns cleanup.
     });
     const result = await session.send(body);
     promptAccepted = body.type === "prompt";

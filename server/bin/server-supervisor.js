@@ -496,6 +496,20 @@ class StableServerSupervisor {
     } catch { /* already gone */ }
   }
 
+  // Next.js loads each route's server chunk on first hit; on a cold node with
+  // a slow disk that first hit can take >10s. Warm the hot routes right after
+  // startup with unsigned GETs — they 401 only after the module (and its whole
+  // import graph) has loaded, which is the expensive part we pay here instead
+  // of on the user's first click. Fire-and-forget by design.
+  warmRoutes() {
+    const base = `http://${this.hostname}:${this.port}`;
+    for (const route of ["/api/sessions", "/api/models", "/api/agent/running", "/api/pihub/setup"]) {
+      fetch(`${base}${route}`, { signal: AbortSignal.timeout(60_000) })
+        .then((response) => response.arrayBuffer())
+        .catch(() => undefined);
+    }
+  }
+
   openBrowser() {
     const url = `http://${this.hostname}:${this.port}`;
     let opener;
@@ -543,6 +557,7 @@ class StableServerSupervisor {
       child = this.spawnServer(packageRoot, version, this.port, { ipc: true });
       await this.waitForExactHealth(child, this.port, version, Date.now() + STARTUP_HEALTH_TIMEOUT_MS, controller.signal);
       this.restartAttempts = 0;
+      this.warmRoutes();
     } catch (error) {
       if (child) await this.stopChild(child).catch(() => undefined);
       try {
@@ -578,6 +593,7 @@ class StableServerSupervisor {
     try {
       child = this.spawnServer(input.packageRoot, input.version, this.port, { ipc: true });
       await this.waitForExactHealth(child, this.port, input.version, input.deadlineAt, input.signal);
+      this.warmRoutes();
       return true;
     } catch (error) {
       if (child) await this.stopChild(child).catch(() => undefined);

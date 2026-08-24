@@ -78,7 +78,7 @@ export async function POST(req: Request) {
     const tempKey = `__new__${randomUUID()}`;
     const { session, realSessionId } = await startRpcSession(tempKey, "", canonicalCwd, {
       ownerId: authentication.deviceId,
-      signal: req.signal,
+      // No req.signal: session creation must survive a client disconnect.
       ...(toolNames ? { toolNames } : {}),
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),
