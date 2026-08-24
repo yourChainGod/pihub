@@ -214,7 +214,7 @@ jobs:
           while [[ "${remote_type}" == "tag" ]]; do
             ((peel_depth += 1))
             ((peel_depth <= 4)) || { echo "The release tag nesting is invalid" >&2; exit 1; }
-            remote_object="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
+            remote_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${remote_object}")"
             remote_object="$(jq -er '.object.sha' <<<"${remote_tag}")"
             remote_type="$(jq -er '.object.type' <<<"${remote_tag}")"
           done
