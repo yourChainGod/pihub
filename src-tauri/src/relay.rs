@@ -158,6 +158,10 @@ fn encode_frame(sequence: u32, payload: &[u8]) -> Vec<u8> {
 async fn connect_client(token: &str, name: &str, state: std::sync::Arc<RelayState>) -> Result<async_nats::Client, String> {
     let options = async_nats::ConnectOptions::with_user_and_password("desktop".into(), token.to_owned())
         .name(name)
+        // The crate imposes a 10s internal request deadline by default; the
+        // outer tokio timeout already enforces the per-request budget
+        // (30/90/300s), so disable the inner one — a cold node can take >10s.
+        .request_timeout(None)
         .event_callback(move |event| {
             let state = state.clone();
             async move {
