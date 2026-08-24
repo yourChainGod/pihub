@@ -9,7 +9,7 @@ import {
   openSessionManagerCached,
 } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
-import { projectTreeForResponse } from "@/lib/project-tree";
+import { collectBranchLeaves, projectTreeForResponse } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { privateSessionJson, requireOwnedSession } from "@/lib/session-access";
 import { getSessionOwner, removeSessionOwner } from "@/lib/session-ownership";
@@ -56,11 +56,16 @@ export async function GET(
     const filePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
     const entries = sm.getEntries();
     const leafId = sm.getLeafId();
-    const tree = projectTreeForResponse(sm.getTree());
     const searchParams = new URL(req.url).searchParams;
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
     const desktop = searchParams.has("desktop");
+    // The projected tree runs ~1MB on long sessions and the desktop only ever
+    // reads its leaves (branch switcher). Desktop clients get the flat leaf
+    // list instead; the full tree stays for the web UI.
+    const projected = projectTreeForResponse(sm.getTree());
+    const tree = desktop ? null : projected;
+    const branches = desktop ? collectBranchLeaves(projected as never, leafId) : undefined;
     const after = searchParams.get("after");
     const before = searchParams.get("before");
     const fullContext = buildSessionContext(entries as never, leafId, { deferThinking, deferToolResultImages });
@@ -102,7 +107,8 @@ export async function GET(
       filePath,
       info,
       leafId,
-      tree,
+      ...(tree ? { tree } : {}),
+      ...(branches ? { branches } : {}),
       context,
       totalActiveMs,
     });

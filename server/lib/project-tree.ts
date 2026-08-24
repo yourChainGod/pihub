@@ -174,3 +174,31 @@ export function projectTreeForResponse<T extends ProjectableTreeNode<T>>(
 
   return projectedRoots;
 }
+
+export type BranchLeaf = { id: string; label: string; active: boolean };
+
+/**
+ * The desktop's BranchSwitch only ever reads leaf entries (id, label,
+ * compressedEntryIds membership). Shipping the whole projected tree costs ~1MB
+ * per open on long sessions, so desktop requests get just this flat leaf list.
+ */
+export function collectBranchLeaves<T extends ProjectableTreeNode<T> & { label?: string }>(
+  nodes: T[],
+  leafId: string | null,
+): BranchLeaf[] {
+  const leaves: BranchLeaf[] = [];
+  const walk = (node: T): void => {
+    if (!node.children.length) {
+      leaves.push({
+        id: node.entry.id,
+        label: node.label || node.branchPreview?.text || node.entry.type,
+        active: node.entry.id === leafId
+          || Boolean(leafId && node.compressedEntryIds?.includes(leafId)),
+      });
+      return;
+    }
+    for (const child of node.children) walk(child);
+  };
+  for (const node of nodes) walk(node);
+  return leaves;
+}
