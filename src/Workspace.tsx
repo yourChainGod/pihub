@@ -134,8 +134,6 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   // measures stale heights, which broke bottom-follow and prepend anchoring.
   const followBottomRef = useRef(false);
   const prependHeightRef = useRef<number | null>(null);
-  // Per-session scroll memory: recorded on scroll, restored once on switch.
-  const scrollPositionsRef = useRef(new Map<string, number>());
   const pendingRestoreRef = useRef<{ session: string; top: number | null } | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   const deviceRef = useRef<Device | null>(null);
@@ -386,7 +384,7 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
 
   useEffect(() => {
     if (!device || !selectedId) { detailRef.current = null; setDetail(null); return; }
-    pendingRestoreRef.current = { session: selectedId, top: scrollPositionsRef.current.get(selectedId) ?? null };
+    pendingRestoreRef.current = { session: selectedId, top: null };
     let alive = true;
     const key = cacheKey(device.id, selectedId);
     const immediate = peekSession(key);
@@ -429,11 +427,9 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
     return () => { alive = false; };
   }, [device, selectedId, refreshDetail, backfillHistory]);
 
-  // Restore the remembered scroll position once the switched session renders;
-  // no record means first open → jump to the latest messages. The detail state
-  // still holds the previous session for one commit after a switch — wait for
-  // the frame where the committed detail is the one detailRef just adopted,
-  // otherwise the pending restore would be consumed against the old session.
+  // Every session switch lands at the latest messages (operator expectation:
+  // 打开会话就是看最新进展). Scroll-up history reading is preserved per session
+  // only while the session stays selected — switching away and back re-bottoms.
   useEffect(() => {
     const pending = pendingRestoreRef.current;
     if (!pending || !detail || pending.session !== selectedId) return;
@@ -673,6 +669,12 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
             else next.set(request.id, { sessionId, ask: request.ask!, error: request.error });
             return next;
           });
+          // A fresh ask blocks the agent on user input — surface it like the
+          // legacy confirm/select prompts do.
+          if (!request.closed && isTauriEnvironment()) {
+            void notifyDone("需要您的确认", request.ask.title || "Pi 正在等待您的回复").catch(() => undefined);
+            void import("@tauri-apps/plugin-app").then((app) => app.show()).catch(() => undefined);
+          }
           return;
         }
         if (request.method === "custom") {
@@ -795,7 +797,11 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
   }, [askFlows, selectedId]);
   const contextUsage: RemoteContextUsage | null = agentState?.contextUsage ?? null;
   const isCompacting = Boolean(agentState?.isCompacting) || compactBusy;
-  const branches = useMemo(() => collectBranches(detail?.tree ?? [], detail?.leafId ?? null), [detail]);
+  const branches = useMemo(() => {
+    // Newer servers send the flat leaf list; older ones send the full tree.
+    if (detail?.branches) return detail.branches.length > 1 ? detail.branches : [];
+    return collectBranches(detail?.tree ?? [], detail?.leafId ?? null);
+  }, [detail]);
 
   /* Slash command palette: local builtins + server commands (lazy-loaded). */
   const slashQuery = draft.startsWith("/") && !/\s/.test(draft.slice(1)) ? draft.slice(1).toLowerCase() : null;
@@ -1420,7 +1426,7 @@ export default function Workspace({ deviceId }: { deviceId: string }) {
       {notice && <div className="workspace-notice" role="status"><Check size={13} /><span>{notice}</span><button onClick={() => setNotice("")} aria-label="关闭"><X size={13} /></button></div>}
       {selected?.interrupted && !isRunning && <div className="interrupted-banner" role="status"><CircleAlert size={14} /><span>上次运行被中断（服务重启或连接断开），上下文已保留。</span><button onClick={() => void resumeInterrupted()}>继续运行</button></div>}
       <div className="message-area">
-        <div className="message-scroll" ref={messageScrollRef} onScroll={(event) => { const el = event.currentTarget; if (selectedIdRef.current) scrollPositionsRef.current.set(selectedIdRef.current, el.scrollTop); setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 320); }}>
+        <div className="message-scroll" ref={messageScrollRef} onScroll={(event) => { const el = event.currentTarget; setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 320); }}>
           {detail?.context.truncated && <button className="load-older" onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? <LoaderCircle className="spin" size={13} /> : <ChevronDown size={13} />}加载更早消息（当前 {detail.context.messages.length}/{detail.context.totalMessages}）</button>}
           {detailLoading && !detail ? <div className="conversation-empty"><LoaderCircle className="spin" />加载最近消息…</div> : detail?.context.messages.length ? <ConversationMessages messages={detail.context.messages} entryIds={detail.context.entryIds} onFork={forkFromEntry} forkingId={forkingId || undefined} onLoadThinking={device && selectedId ? loadThinkingBlock : undefined} /> : <div className="conversation-empty"><Bot size={34} /><h3>准备开始</h3><p>从左侧选择会话，或创建一个新的工作会话。</p></div>}
         </div>

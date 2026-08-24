@@ -88,11 +88,19 @@ export interface SessionTreeNode {
   branchPreview?: { role?: "user" | "assistant"; text: string };
 }
 
+export interface BranchLeaf {
+  id: string;
+  label: string;
+  active: boolean;
+}
+
 export interface SessionDetail {
   sessionId: string;
   filePath?: string;
   leafId?: string | null;
   tree?: SessionTreeNode[];
+  /** Flat branch-leaf list; newer servers send this instead of the full tree. */
+  branches?: BranchLeaf[];
   info: RemoteSession | null;
   context: {
     messages: SessionMessage[];
