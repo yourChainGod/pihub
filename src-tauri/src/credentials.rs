@@ -524,11 +524,11 @@ mod twin_tests {
     #[test]
     fn tailnet_twin_matches_only_the_same_node_hostname() {
         use super::is_tailscale_twin;
-        assert!(is_tailscale_twin("https://dgn-01.tailb5817b.ts.net:30141", "dgn-01"));
-        assert!(is_tailscale_twin("https://dgn-01.tailb5817b.ts.net", "dgn-01"));
+        assert!(is_tailscale_twin("https://dgn-01.example.ts.net:30141", "dgn-01"));
+        assert!(is_tailscale_twin("https://dgn-01.example.ts.net", "dgn-01"));
         assert!(!is_tailscale_twin("https://dgn-01.nodes.ffuu.eu.org", "dgn-01"));
-        assert!(!is_tailscale_twin("https://dgn-011.tailb5817b.ts.net", "dgn-01"));
-        assert!(!is_tailscale_twin("https://other.tailb5817b.ts.net", "dgn-01"));
+        assert!(!is_tailscale_twin("https://dgn-011.example.ts.net", "dgn-01"));
+        assert!(!is_tailscale_twin("https://other.example.ts.net", "dgn-01"));
         assert!(!is_tailscale_twin("not a url", "dgn-01"));
     }
 }

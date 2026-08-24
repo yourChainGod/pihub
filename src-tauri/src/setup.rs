@@ -21,7 +21,7 @@ pub(crate) struct BootstrapResult {
     requires_approval: bool,
     approval_url: Option<String>,
 }
-pub(crate) const PIHUB_SERVER_VERSION: &str = "0.1.0";
+pub(crate) const PIHUB_SERVER_VERSION: &str = "0.1.1";
 pub(crate) const PIHUB_SERVER_RELEASE_OWNER: &str = "yourChainGod";
 pub(crate) const PIHUB_SERVER_RELEASE_REPO: &str = "pihub";
 pub(crate) const PIHUB_SERVER_RELEASE_CHANNEL: &str = "stable";
