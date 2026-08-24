@@ -73,7 +73,7 @@
     "@types/proper-lockfile": "4.1.4",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^9",
+    "eslint": "^10",
     "eslint-config-next": "16.3.1",
     "katex": "^0.16.47",
     "react-markdown": "^10.1.0",
