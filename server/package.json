@@ -69,7 +69,7 @@
     "@threema/wasm-minisign-verify": "0.2.0-rc.1",
     "@types/busboy": "^1.5.4",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^25",
+    "@types/node": "^26",
     "@types/proper-lockfile": "4.1.4",
     "@types/react": "^19",
     "@types/react-dom": "^19",
