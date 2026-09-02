@@ -271,7 +271,7 @@ function DeviceCard({ device, status, paired, onOpen, onRefresh, onPair, onUnpai
   const state = status?.state ?? "checking";
   useEffect(() => {
     if (!menu) return;
-    const close = (event: PointerEvent) => { if (!(event.target as HTMLElement).closest(".card-actions")) setMenu(false); };
+    const close = (event: PointerEvent) => { if (!(event.target as HTMLElement).closest(".card-actions, .card-menu")) setMenu(false); };
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setMenu(false); };
     document.addEventListener("pointerdown", close, true);
     document.addEventListener("keydown", escape);
@@ -289,13 +289,16 @@ function DeviceCard({ device, status, paired, onOpen, onRefresh, onPair, onUnpai
           <button className="tiny-button" onClick={onRefresh} disabled={state === "checking"} aria-label={`刷新 ${device.name} 状态`}><RefreshCw size={15} className={state === "checking" ? "spin" : undefined} /></button>
           <button className={`tiny-button ${device.favorite ? "active" : ""}`} onClick={onFavorite} aria-label={device.favorite ? "取消收藏" : "收藏设备"}><Heart size={15} fill={device.favorite ? "currentColor" : "none"} /></button>
           <button className="tiny-button" onClick={() => setMenu(!menu)} aria-label="设备菜单" aria-expanded={menu}><MoreHorizontal size={17} /></button>
-          {menu && <div className="card-menu">
-            <button onClick={() => { setMenu(false); onEdit(); }}><Pencil size={14} />编辑设备</button>
-            {paired && <button onClick={() => { setMenu(false); onUnpair(); }}><Unlink size={14} />解除本机配对</button>}
-            <button className="danger" onClick={() => { setMenu(false); onDelete(); }}><Trash2 size={14} />移除设备</button>
-          </div>}
         </div>
       </div>
+      {/* Must be a direct child of the card: inside .card-actions the menu's
+          z-index ranks within the actions row's context, and the card's other
+          flex children (card-foot) shadow its hit area. */}
+      {menu && <div className="card-menu">
+        <button onClick={() => { setMenu(false); onEdit(); }}><Pencil size={14} />编辑设备</button>
+        {paired && <button onClick={() => { setMenu(false); onUnpair(); }}><Unlink size={14} />解除本机配对</button>}
+        <button className="danger" onClick={() => { setMenu(false); onDelete(); }}><Trash2 size={14} />移除设备</button>
+      </div>}
       <div className="card-foot">
         <span className={`status-pill ${state}`}>{state === "online" ? "在线" : state === "auth" ? "待配对" : state === "checking" ? "检查中" : "离线"}</span>
         <span className="card-meta">{status?.latencyMs !== undefined ? `${status.latencyMs} ms` : "—"} · {status?.version ? `v${status.version.replace(/^v/, "")}` : "—"}</span>
