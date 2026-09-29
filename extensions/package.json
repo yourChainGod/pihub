@@ -6,7 +6,7 @@
     "node": ">=22.19.0 <23"
   },
   "dependencies": {
-    "@cortexkit/pi-magic-context": "0.38.0",
+    "@cortexkit/pi-magic-context": "0.44.1",
     "@eko24ive/pi-ask": "1.2.0",
     "@ff-labs/pi-fff": "0.10.5",
     "@gotgenes/pi-permission-system": "26.3.0",
