@@ -29,6 +29,20 @@ Browser ──HTTPS/WSS──> Cloudflare edge ──tunnel(QUIC)──> cloudfl
 
 `start-tunnel.sh` 通过 `TUNNEL_TOKEN` 环境变量传递 token，避免出现在 `ps` 输出里。
 
+## 一条命令恢复（沙箱被回收后）
+
+这个沙箱是**临时**的：`~/.local/bin`、`~/.cloudflared`、`/tmp` 都不会保留。
+容器重建后两个进程全丢，公网表现为 **Cloudflare 530 / 错误 1033**（隧道无连接），
+本地表现为 `curl: (7)`。恢复只需：
+
+```bash
+TUNNEL_TOKEN='<你的隧道 token>' ops/ttyd-cf-tunnel/bootstrap.sh
+```
+
+脚本幂等：只补缺失的二进制/凭据，再重启两个进程并自检。
+省略 `TUNNEL_TOKEN` 时复用已有的 `~/.cloudflared/tunnel-token`。
+
+
 ## 启动 / 停止
 
 ```bash
