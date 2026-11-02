@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli", "deflate", "zstd", "stream"] }
 reqwest-updater = { package = "reqwest", version = "=0.13.4", default-features = false }
-rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", features = ["time", "sync", "macros", "rt", "process", "io-util"] }
 url = "2"
 percent-encoding = "2"
